@@ -1,0 +1,574 @@
+<!-- pages/index/index.wxml
+     四象限事项中心 · 单页状态机
+     view: overview（矩阵总览） / detail（象限下钻） / all（跨象限） / mine（我的）
+     象限色通过 q1~q4 类挂到 .screen / .row / .q 上，色条与色块读同一个 --qc。 -->
+
+<!-- 事项卡片：详情页与「全部」页共用，避免两份实现。
+     左滑只有两个操作（120rpx × 2 = 240rpx，与 index.js 的 SWIPE_W 对齐）：
+       未完成 → 完成 / 删除；已完成 → 撤销 / 删除。
+     ⚠️ 操作组**只在「这一行正被滑开」时才渲染**（swipeKey===item._id）：
+       ① 已完成的行整块是半透明的，操作组若常驻渲染，就会从卡片底下透出来，
+          看起来像「没左滑也挂着一排按钮」；
+       ② 排序模式整组不渲染（那时候只允许拖动）。
+       更早的写法是「常驻 + 靠 .row-in 盖住」，拖动时卡片一发生纵向位移就露馅——
+       别再靠遮挡来隐藏。
+     style 上的 translateY 承担拖动排序：拖动的卡片跟手指走（dragY），
+     其余卡片按 drop 目标换位（item.shift，由 JS 算好，单位 px）。
+     拖动入口是右侧的 .dh 手柄（仅排序模式渲染）：它用 catch 吃掉 touch 事件，
+     把「拖」和「滚」划成两块互不干扰的区域 —— 列表因此在排序模式下照样能滚。 -->
+<template name="itemRow">
+  <!-- .row 的裁剪只在「这一行被滑开」时才需要（那层操作面板要被卡片圆角裁掉）。
+       常驻 overflow:hidden 会让每一行在滚动容器里都多出一个裁剪层，
+       长列表滚动时 iOS 的重绘会跟不上，出现「滑到的卡片是空白」。
+       静止的行不该带裁剪，也不该带 transform（见下面 style）。 -->
+  <view class="row {{item.done?'done':''}} {{item.q}} {{sortMode?'sorting':''}} {{sortPulse?'pulse':''}} {{swipeKey===item._id?'sw':''}} {{item._id===dragId?'liftrow':''}}">
+    <view class="rowacts" wx:if="{{!sortMode && swipeKey===item._id}}">
+      <view class="act ok" data-act="done" data-id="{{item._id}}" catchtap="onRowAct">
+        <view class="ico {{item.done?'ico-undo':'ico-check'}}"></view>
+        <text class="lbl">{{item.done?'撤销':'完成'}}</text>
+      </view>
+      <view class="act del" data-act="del" data-id="{{item._id}}" catchtap="onRowAct">
+        <view class="ico ico-trash"></view>
+        <text class="lbl">删除</text>
+      </view>
+    </view>
+    <!-- ⚠️ 静止的行**不挂 transform**（写 none，而不是 translateX(0) translateY(0)）。
+         带 transform 的元素会被浏览器提升成独立图层，滚动容器里几十个图层叠着，
+         长列表快速滚动时新暴露的卡片就来不及重绘 —— 用户看到的就是「滑到的块都消失了」。
+         只有「正被滑开 / 正被拖动 / 需要让位」三种情况才真的需要位移。 -->
+    <view
+      class="row-in {{dragging && item._id===swipeKey?'dragging':''}} {{item._id===dragId?'dragging lift':''}}"
+      style="transform:{{item._id===swipeKey || item._id===dragId || item.shift ? 'translateX(' + (item._id===swipeKey?swipeX:0) + 'rpx) translateY(' + (item._id===dragId?dragY:item.shift) + 'px)' : 'none'}}"
+      data-id="{{item._id}}"
+      catchtap="onRowTap"
+      bindtouchstart="onRowStart"
+      bindtouchmove="onRowMove"
+      bindtouchend="onRowEnd"
+      bindtouchcancel="onRowEnd"
+    >
+      <view class="tx">
+        <text class="t">{{item.title}}</text>
+        <text class="n" wx:if="{{item.note}}">{{item.note}}</text>
+        <view class="tags">
+          <text class="tag pri">{{item.priLabel}}</text>
+          <text class="tag cat">{{item.catName}}</text>
+          <text class="tag time" wx:if="{{item.remindText}}">{{item.remindText}}</text>
+        </view>
+      </view>
+      <!-- 拖动手柄：只在排序模式渲染，是「拖动」与「滚动」的分界线。
+           它用 catch 而不是 bind 吃掉 touchstart / touchmove —— 事件不会继续冒泡到
+           scroll-view，所以按住手柄 ＝ 拖卡片，按住卡片别处 ＝ 滚列表。
+           两种手势从此不再抢同一串 touchmove，排序模式也就不必再关滚动。
+           （只用 bind 的话，滚动区照样收到 touchmove，会一边滚一边拖。） -->
+      <view
+        class="dh"
+        wx:if="{{sortMode}}"
+        data-id="{{item._id}}"
+        catchtouchstart="onHandleStart"
+        catchtouchmove="onHandleMove"
+        catchtouchend="onHandleEnd"
+        catchtouchcancel="onHandleEnd"
+      >
+        <view class="ico ico-drag"><view class="c"></view><view class="c"></view><view class="c"></view></view>
+      </view>
+    </view>
+  </view>
+</template>
+
+<view class="screen {{view==='detail' ? 'detail-mode ' + quad : ''}}">
+
+  <view class="statusbar" style="height:{{statusBarHeight}}px"></view>
+
+  <!-- ============ 顶部应用栏（非详情态） ============ -->
+  <view class="appbar" wx:if="{{view!=='detail'}}" style="padding-right:{{capsuleReserve}}px">
+    <view class="appbar-text">
+      <view class="h2">{{pageTitle}}</view>
+      <text class="meta">{{pageMeta}}</text>
+    </view>
+    <view class="iconbtn" bindtap="onGotoMine">
+      <view class="ico ico-sliders">
+        <view class="sl"><view class="kn" style="left:72%"></view></view>
+        <view class="sl"><view class="kn" style="left:28%"></view></view>
+        <view class="sl"><view class="kn" style="left:55%"></view></view>
+      </view>
+    </view>
+  </view>
+
+  <!-- ============ 分类胶囊（仅总览） ============
+       右侧「+」固定成独立一列，左边的胶囊自己横向滚动。
+       早先把新增按钮放在 scroll-view 内部，分类一多它就被滚出屏幕，再也点不到。 -->
+  <view wx:if="{{view==='overview'}}" class="catsrow">
+    <!-- flex 容器必须放在 scroll-view 内部（.cats-inner）：
+         直接给 scroll-view 写 display:flex（配 enable-flex）实测无效，
+         胶囊会按行内盒排在文字基线上，被 scroll-view 的 overflow:hidden
+         从顶部裁掉约 13px（表现为「标签块被遮挡 + 文字不居中」）。 -->
+    <scroll-view class="cats" scroll-x>
+      <view class="cats-inner">
+        <view
+          class="cat {{item.on?'on':''}}"
+          wx:for="{{catTabs}}"
+          wx:key="id"
+          data-k="{{item.id}}"
+          bindtap="onPickCat"
+        >
+          <text>{{item.name}}</text>
+          <text class="cnt">{{item.count}}</text>
+        </view>
+      </view>
+    </scroll-view>
+    <view class="cats-add" bindtap="onAddCategory">
+      <view class="ico ico-plus"></view>
+    </view>
+  </view>
+
+  <!-- ============ 统计条（仅总览） ============ -->
+  <view class="stats" wx:if="{{view==='overview'}}">
+    <view class="stat" wx:for="{{stats}}" wx:key="k">
+      <view class="v num">{{item.v}}</view>
+      <view class="k">{{item.k}}</view>
+    </view>
+  </view>
+
+  <!-- ============ 固定头部（详情 / 全部） ============
+       列表长了以后，头部不能跟着滚走。所以 dhead / filters / sortrow / 提示行
+       全部留在 .scroller **之外**，作为 .screen 这个纵向 flex 的固定子项
+       （flex:0 0 auto），只有事项列表在滚动区里。
+       排序模式下 sortrow 与提示行整组隐藏（那时只允许拖卡片右侧的手柄）。 -->
+  <block wx:if="{{view==='detail'}}">
+    <view class="dhead {{quad}}">
+      <view class="bar" style="padding-right:{{capsuleReserve}}px">
+        <view class="bar-btn" bindtap="onBack"><view class="ico ico-chev-l"></view></view>
+        <view class="h3">{{quadName}}</view>
+        <view class="bar-btn {{sortMode?'lock':''}}" bindtap="onQuadMenu">
+          <view class="ico ico-dots"><view class="d"></view><view class="d"></view><view class="d"></view></view>
+        </view>
+      </view>
+      <view class="big num">{{quadUndone}}</view>
+      <text class="cap">{{quadCap}}</text>
+      <view class="hintpill">{{quadHint}}</view>
+    </view>
+
+    <view class="filters {{sortMode?'lock':''}}">
+      <view
+        class="f {{item.on?'on':''}}"
+        wx:for="{{filters}}"
+        wx:key="k"
+        data-k="{{item.k}}"
+        bindtap="onFilter"
+      >{{item.label}}</view>
+    </view>
+
+    <block wx:if="{{!sortMode}}">
+      <!-- 排序入口：点开后只允许拖动卡片，其余按钮全部锁住 -->
+      <view class="sortrow">
+        <text class="shint">拖动卡片右侧手柄调整顺序 · 列表可滚动</text>
+        <view class="sbtn" bindtap="onSortToggle">
+          <view class="ico ico-sort"><view class="c up"></view><view class="c dn"></view></view>
+          <text>调整顺序</text>
+        </view>
+      </view>
+      <text class="swipecue left">向左滑动卡片展开操作 · 点卡片进入编辑</text>
+    </block>
+  </block>
+
+  <!-- 全部页的固定头部：appbar 之下就是「调整顺序」+ 提示行，列表只在中间滚 -->
+  <block wx:if="{{view==='all' && !sortMode}}">
+    <view class="sortrow">
+      <text class="shint">{{sections.length}} 个分段 · 拖动可调整顺序并跨象限</text>
+      <view class="sbtn" bindtap="onSortToggle">
+        <view class="ico ico-sort"><view class="c up"></view><view class="c dn"></view></view>
+        <text>调整顺序</text>
+      </view>
+    </view>
+    <text class="swipecue left">向左滑动可完成或删除</text>
+  </block>
+
+  <!-- ============ 主滚动区 ============
+       只装事项列表。
+
+       ⚠️ 这里一度写的是 scroll-y="{{!dragOn}}" / "{{!sortMode}}" ——
+       「拖动与滚动是同一个手势，不能同时开」这个判断没错，但解法错了：
+       滚动是**视图层**在 touchmove 那一刻就启动的，setData 关得晚半拍，
+       于是列表一边滚、卡片一边重排，两边打架，新露出来的卡片来不及重绘
+       （「滑动时卡片乱跳 / 整块消失」就是这么来的）。
+
+       真正的解法是把两种手势分开：拖动只认卡片右侧的手柄（.dh，用 catch
+       吃掉事件，滚动区根本收不到），卡片其余区域照常交给 scroll-view。
+       所以 scroll-y 现在是常开的，排序模式也能滚。
+
+       scroll-top 只有一个用途：拖到屏幕边缘时列表自己滚（见 JS 的 runAutoScroll）。
+       bindscroll 用来把真实滚动量同步回行位置快照，手动滚、自动滚共用同一条回路。 -->
+  <scroll-view class="scroller" scroll-y scroll-top="{{scrollTop}}" bindscroll="onScrollerScroll">
+    <view class="body {{view==='detail' ? 'flush' : (view==='all' ? 'tight' : '')}}" bindtap="onBlankTap">
+
+      <!-- ---------- 首屏加载 ---------- -->
+      <view wx:if="{{!ready}}" class="loading-hint">加载中…</view>
+
+      <!-- ---------- 总览：2×2 满色矩阵 ---------- -->
+      <block wx:elif="{{view==='overview'}}">
+        <view class="grid">
+          <view
+            class="q {{item.key}} {{item.nb?'nb':''}}"
+            wx:for="{{grid}}"
+            wx:key="key"
+            data-k="{{item.key}}"
+            bindtap="onOpenQuad"
+          >
+            <view class="qtop">
+              <text class="qname">{{item.name}}</text>
+              <text class="qhint">{{item.hint}}</text>
+            </view>
+            <view class="qnum num">{{item.count}}</view>
+            <view class="qlist">
+              <block wx:if="{{item.empty}}">
+                <view class="gempty">空着挺好<text class="s">点进来放点东西</text></view>
+              </block>
+              <block wx:else>
+                <view class="gi" wx:for="{{item.lines}}" wx:for-item="ln" wx:key="idx">
+                  <view class="dot" style="{{ln.more?'background:transparent':''}}"></view>
+                  <text class="tx">{{ln.text}}</text>
+                </view>
+              </block>
+            </view>
+          </view>
+        </view>
+        <text class="swipecue">矩阵按「重要性 × 紧急性」排列 · 外角朝外的是最高优先级</text>
+      </block>
+
+      <!-- ---------- 象限详情：头部已在固定区，这里只剩滚动主体 ---------- -->
+      <block wx:elif="{{view==='detail'}}">
+        <view class="rows-wrap">
+          <block wx:if="{{rows.length}}">
+            <block wx:for="{{rows}}" wx:key="_id">
+              <template is="itemRow" data="{{item: item, sortMode: sortMode, swipeKey: swipeKey, swipeX: swipeX, dragId: dragId, dragY: dragY, dragging: dragging}}" />
+            </block>
+          </block>
+          <view wx:else class="emptystate">
+            <view class="t">这一格是空的</view>
+            <view class="d">空象限通常说明你有在克制</view>
+          </view>
+        </view>
+      </block>
+
+      <!-- ---------- 全部：按象限分段（排序模式下可拖动，跨段即改象限） ---------- -->
+      <block wx:elif="{{view==='all'}}">
+        <block wx:if="{{sections.length}}">
+          <view class="sec {{dropQuad===sec.key?'drop':''}}" wx:for="{{sections}}" wx:key="key" wx:for-item="sec">
+            <view class="sechead">
+              <view class="sdot {{sec.key}}"></view>
+              <text class="sname">{{sec.name}}</text>
+              <text class="scount num">{{sec.count}}</text>
+              <text class="droptip" wx:if="{{dropQuad===sec.key}}">松手移到这里</text>
+            </view>
+            <block wx:for="{{sec.rows}}" wx:key="_id">
+              <template is="itemRow" data="{{item: item, sortMode: sortMode, swipeKey: swipeKey, swipeX: swipeX, dragId: dragId, dragY: dragY, dragging: dragging}}" />
+            </block>
+          </view>
+        </block>
+        <view wx:else class="emptystate">
+          <view class="t">还没有事项</view>
+          <view class="d">点右下角加一条</view>
+        </view>
+      </block>
+
+      <!-- ---------- 我的 ---------- -->
+      <block wx:else>
+        <view class="stats flat">
+          <view class="stat" wx:for="{{mineStats}}" wx:key="k">
+            <view class="v num">{{item.v}}</view>
+            <view class="k">{{item.k}}</view>
+          </view>
+        </view>
+
+        <view class="mecard">
+          <view class="h4">家庭</view>
+          <text class="hint">{{fam.isOwner ? '你和家人共用这一份清单，任何改动双方都能看到' : '你正在「' + fam.name + '」里，改动对所有人可见'}}</text>
+
+          <view class="catrow" bindtap="onRenameFamily">
+            <view class="dot on"></view>
+            <text class="nm">{{fam.name}}</text>
+            <text class="ct">{{fam.isOwner ? '点改名' : '成员'}}</text>
+          </view>
+
+          <view class="catrow" wx:for="{{fam.members}}" wx:key="key">
+            <view class="dot {{item.me?'on':''}}"></view>
+            <text class="nm">{{item.name}}</text>
+            <text class="ct">{{item.role==='owner'?'创建者':'成员'}}</text>
+          </view>
+
+          <view class="func" bindtap="onRenameMe">修改我的显示名<text class="arw">›</text></view>
+          <view class="func" wx:if="{{fam.isOwner}}" bindtap="onGenInvite">{{famInviteLabel}}<text class="arw">›</text></view>
+          <view class="func" bindtap="onJoinFamily">加入家人的家庭<text class="arw">›</text></view>
+          <view class="func warn" wx:if="{{!fam.isOwner}}" bindtap="onLeaveFamily">退出这个家庭<text class="arw">›</text></view>
+        </view>
+
+        <view class="mecard">
+          <view class="h4">分类</view>
+          <text class="hint">分类之间完全隔离，各自维护一套四象限</text>
+          <!-- 点整行 = 切到该分类（高频，保留）；长按 = 改名 / 删除（低频破坏性）。
+               小程序规定绑了 longpress 且触发后 tap 不再触发，所以两者不打架。 -->
+          <view
+            class="catrow"
+            wx:for="{{catRows}}"
+            wx:key="id"
+            data-k="{{item.id}}"
+            bindtap="onPickCat"
+            bindlongpress="onLongPressCat"
+          >
+            <view class="dot {{item.on?'on':''}}"></view>
+            <text class="nm">{{item.name}}</text>
+            <text class="ct">{{item.count}} 项</text>
+          </view>
+          <view class="catrow add" bindtap="onAddCategory">
+            <view class="ico ico-plus"></view>
+            <text class="nm">新增分类</text>
+          </view>
+          <!-- 长按是个没有视觉提示的手势，新用户发现不了。
+               与其藏一个灰色小图标，不如把这行字常驻在这里。 -->
+          <text class="hint flat" style="margin-top:14rpx">长按任意分类，可重命名或删除</text>
+        </view>
+
+        <view class="mecard">
+          <view class="h4">提醒</view>
+          <text class="hint">{{subQuota>0 ? '还剩 ' + subQuota + ' 条推送额度，够后面的提醒用' : '还没有推送额度 —— 保存带提醒的事项时点「允许」就攒一条'}}</text>
+          <view class="catrow" wx:if="{{subMissed>0}}" bindtap="onExplainMissed">
+            <view class="dot on"></view>
+            <text class="nm">{{subMissed}} 条提醒未送达</text>
+            <text class="ct">看原因</text>
+          </view>
+          <!-- 额度是「按条」的，这一点必须说清楚：微信的一次性订阅，
+               点一次允许只买到一条消息，不是买到长期推送。 -->
+          <text class="hint flat">每次设提醒都会提前 10 分钟推到微信服务通知；额度按条计算，用完就不再推，但提醒时间仍然存着</text>
+        </view>
+
+        <view class="mecard">
+          <view class="h4">数据</view>
+          <text class="hint">删除不可撤销，操作前会二次确认</text>
+          <view class="func" bindtap="onClearDoneAll">清空已完成<text class="arw">›</text></view>
+          <view class="func" bindtap="onExportJson">导出为 JSON<text class="arw">›</text></view>
+          <!-- 共享之后「清空全部数据」清的是全家人的清单，不再只是自己的，
+               所以只留给家庭创建者；云函数侧有一道同样的校验，改这里不算数。 -->
+          <view class="func warn" wx:if="{{fam.isOwner}}" bindtap="onClearAll">清空全家数据<text class="arw">›</text></view>
+        </view>
+
+        <view class="mecard">
+          <view class="h4">关于</view>
+          <text class="hint flat">四象限事项列表 · v1.2（共享家庭 · 提醒推送）</text>
+          <text class="hint flat">基于艾森豪威尔矩阵 · 数据存于云开发环境</text>
+          <text class="hint flat">家庭内共用一份清单 · 页面可见时每 8 秒自动同步一次</text>
+        </view>
+      </block>
+
+    </view>
+  </scroll-view>
+
+  <!-- ============ 悬浮新建（仅总览） ============ -->
+  <view class="fab" wx:if="{{view==='overview'}}" style="bottom:{{fabBottom}}px" bindtap="onNew">
+    <view class="ico ico-plus big"></view>
+  </view>
+
+  <!-- ============ 排序模式固定底栏 ============
+       排序期间替代底栏 / Tab：一是「只能做拖动操作」，
+       二是「完成」永远在屏幕上（拖动时列表滚不动，入口按钮可能已经被滚走）。 -->
+  <view class="sortdone" wx:if="{{sortMode}}">
+    <text class="sd-hint">按住卡片右侧手柄拖动{{view==='all'?'，拖到别的分段即改象限':''}}</text>
+    <view class="sd-btn" bindtap="onSortToggle">完成</view>
+  </view>
+
+  <!-- ============ 详情页底部主按钮 ============ -->
+  <view class="bottombar" wx:if="{{view==='detail' && !sortMode}}">
+    <view class="btn dark" bindtap="onNewHere">
+      <view class="ico ico-plus sm"></view>
+      <text>在此象限新建</text>
+    </view>
+  </view>
+
+  <!-- ============ 底部 Tab ============ -->
+  <view class="tabbar" wx:if="{{view!=='detail' && !sortMode}}">
+    <view class="tb {{view==='overview'?'on':''}}" data-k="overview" bindtap="onTab">
+      <view class="tbi">
+        <view class="ico ico-grid">
+          <view class="c"></view><view class="c"></view><view class="c"></view><view class="c"></view>
+        </view>
+      </view>
+      <text class="lbl">总览</text>
+    </view>
+    <view class="tb {{view==='all'?'on':''}}" data-k="all" bindtap="onTab">
+      <view class="tbi">
+        <view class="ico ico-list">
+          <view class="c"></view><view class="c"></view><view class="c short"></view>
+        </view>
+      </view>
+      <text class="lbl">全部</text>
+    </view>
+    <view class="tb {{view==='mine'?'on':''}}" data-k="mine" bindtap="onTab">
+      <view class="tbi">
+        <view class="ico ico-user"><view class="h"></view><view class="b"></view></view>
+      </view>
+      <text class="lbl">我的</text>
+    </view>
+  </view>
+
+  <!-- ============ 遮罩 + 底部抽屉 ============ -->
+  <view class="scrim {{sheetOpen?'on':''}}" bindtap="closeSheet"></view>
+
+  <view class="sheet {{sheetOpen?'on':''}}">
+    <view class="handle"></view>
+
+    <!-- 象限管理 -->
+    <block wx:if="{{sheetKind==='quad'}}">
+      <view class="h3">{{sheetTitle}}</view>
+      <text class="sd">{{sheetSub}}</text>
+      <scroll-view class="sheet-body" scroll-y>
+        <view class="mecard" style="margin:0">
+          <view class="func" data-op="markAllDone" bindtap="onQuadBulk">全部标记为已完成<text class="arw">›</text></view>
+          <view class="func" data-op="clearDone" bindtap="onQuadBulk">清空本象限已完成<text class="arw">›</text></view>
+          <view class="func warn" data-op="clearQuad" bindtap="onQuadBulk">删除本象限全部事项<text class="arw">›</text></view>
+        </view>
+      </scroll-view>
+    </block>
+
+    <!-- 分类管理：长按分类行呼出。改名对所有人开放（和「新增分类」对称），
+         删除按破坏力分权：空分类谁都能删，非空分类只有家庭创建者能删。 -->
+    <block wx:elif="{{sheetKind==='catmenu'}}">
+      <view class="h3">{{sheetTitle}}</view>
+      <text class="sd">{{sheetSub}}</text>
+      <scroll-view class="sheet-body" scroll-y>
+        <view class="mecard" style="margin:0">
+          <view class="func" bindtap="onRenameCategory">重命名分类<text class="arw">›</text></view>
+          <view class="func warn" wx:if="{{catCanDel}}" bindtap="onCatDeleteAsk">删除分类<text class="arw">›</text></view>
+          <text
+            class="hint flat"
+            wx:if="{{!catCanDel}}"
+            style="margin-top:14rpx"
+          >这是家人共享的分类，里面还有事项，所以只有家庭创建者可以删除。</text>
+        </view>
+      </scroll-view>
+    </block>
+
+    <!-- 删除非空分类：先给这 N 条事项找新家，再删分类。
+         「移到别处」是默认推荐 —— 共享清单里删掉的可能是家人录的条目，
+         所以先给一个不丢数据的出口，而不是直接问「确定一起删吗」。 -->
+    <block wx:elif="{{sheetKind==='catdel'}}">
+      <view class="h3">删除分类</view>
+      <text class="sd">{{sheetSub}}</text>
+      <scroll-view class="sheet-body" scroll-y>
+        <view class="mecard" style="margin:0 0 24rpx">
+          <text class="hint">把这 {{catDelCount}} 条移到哪个分类</text>
+          <view
+            class="func"
+            wx:for="{{moveRows}}"
+            wx:key="id"
+            data-k="{{item.id}}"
+            bindtap="onPickMoveTo"
+          >{{item.name}}<text class="arw">›</text></view>
+        </view>
+        <view class="mecard" style="margin:0">
+          <view class="func warn" bindtap="onCatDeleteCascade">连同 {{catDelCount}} 条事项一起删除<text class="arw">›</text></view>
+        </view>
+        <text class="sd" style="margin:16rpx 0 0">移到别的分类不会丢数据；一并删除不可恢复。</text>
+      </scroll-view>
+    </block>
+
+    <!-- 新建 / 编辑 -->
+    <block wx:else>
+      <view class="h3">{{sheetTitle}}</view>
+      <text class="sd">{{sheetSub}}</text>
+      <scroll-view class="sheet-body" scroll-y>
+
+        <!-- 已完成的行不再渲染左滑操作组，撤销入口收到这里 -->
+        <view class="mecard" wx:if="{{sheetDone}}" style="margin:0 0 24rpx">
+          <view class="func" bindtap="onSheetUndone">标记为未完成<text class="arw">›</text></view>
+        </view>
+
+        <view class="field">
+          <text class="label">事项标题</text>
+          <input
+            class="input"
+            value="{{form.title}}"
+            placeholder="要做什么？"
+            placeholder-class="ph"
+            maxlength="60"
+            bindinput="onInputTitle"
+          />
+        </view>
+
+        <view class="field">
+          <text class="label">放入哪个象限</text>
+          <view class="qpick">
+            <view
+              class="qp {{item.key}} {{item.sel?'sel':''}}"
+              wx:for="{{qpicks}}"
+              wx:key="key"
+              data-k="{{item.key}}"
+              bindtap="onPickQuad"
+            >
+              <text class="qn">{{item.name}}</text>
+              <text class="qh">{{item.hint}}</text>
+              <view class="ck" wx:if="{{item.sel}}">✓</view>
+            </view>
+          </view>
+        </view>
+
+        <view class="field">
+          <text class="label">备注</text>
+          <textarea
+            class="textarea"
+            value="{{form.note}}"
+            placeholder="补充背景、验收标准…"
+            placeholder-class="ph"
+            maxlength="200"
+            bindinput="onInputNote"
+          />
+        </view>
+
+        <view class="field">
+          <text class="label">分类</text>
+          <view class="pills">
+            <view
+              class="pill {{item.on?'on':''}}"
+              wx:for="{{catPills}}"
+              wx:key="id"
+              data-k="{{item.id}}"
+              bindtap="onPickSheetCat"
+            >{{item.name}}</view>
+            <view class="pill" bindtap="onAddCategory">+ 新增</view>
+          </view>
+        </view>
+
+        <view class="field">
+          <text class="label">优先级</text>
+          <view class="pills">
+            <view
+              class="pill pri {{item.on?'on':''}}"
+              wx:for="{{priPills}}"
+              wx:key="p"
+              data-p="{{item.p}}"
+              bindtap="onPickPri"
+            >P{{item.p}}</view>
+          </view>
+        </view>
+
+        <view class="field">
+          <text class="label">提醒时间</text>
+          <view class="rowline">
+            <picker class="pdate" mode="date" value="{{form.date}}" bindchange="onDate">
+              <view class="pick {{form.hasRemind?'':'ph'}}">{{form.dateLabel}}</view>
+            </picker>
+            <picker class="ptime" mode="time" value="{{form.time}}" bindchange="onTime">
+              <view class="pick right">{{form.time}}<view class="ico ico-chev-r"></view></view>
+            </picker>
+            <view class="clear" wx:if="{{form.hasRemind}}" bindtap="onClearRemind">清除</view>
+          </view>
+        </view>
+
+      </scroll-view>
+
+      <!-- 保存按钮必须放在滚动区之外，否则会跟着表单滚走 -->
+      <view class="sheet-foot">
+        <view class="btn primary" bindtap="onSave">{{saveLabel}}</view>
+      </view>
+    </block>
+  </view>
+
+</view>

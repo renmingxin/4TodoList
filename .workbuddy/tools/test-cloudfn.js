@@ -1,0 +1,836 @@
+// 云函数 fqTodo 的逻辑仿真测试
+//
+// 为什么要单独测它：云函数是**本地改完必须手动上传部署**的一份代码，
+// 「本地对了、线上是旧包」和「本地本身就写错了」在模拟器里长得一模一样
+// （都是那一条 toast）。这份测试直接把 fqTodo/index.js 加载进假数据库跑，
+// 就能把这两种情况区分开 —— 它绿了，说明代码是对的，问题只在部署。
+//
+// 做法：拦截 require('wx-server-sdk')，换成一个内存实现的假 SDK。
+// 假 SDK 只实现 fqTodo 真正用到的那几个方法，不做通用模拟。
+
+const path = require('path');
+const fs = require('fs');
+
+const ROOT = path.resolve(__dirname, '..', '..');
+const FN_PATH = path.join(ROOT, 'cloudfunctions/fqTodo/index.js');
+
+/* ---------------- 假云数据库 ---------------- */
+// 假 SDK 已抽到 fake-cloud.js —— fqTodo 与 fqRemind 两份测试共用同一份实现，
+// 免得查询语义（尤其是 _.neq 对「字段不存在」的处理）在两边漂移。
+// 注意：必须在 require 云函数**之前** install，否则云函数拿到的是真 SDK。
+
+const FC = require('./fake-cloud.js');
+const COLLECTIONS = FC.COLLECTIONS;
+const fn = FC.loadFunction(FN_PATH);
+
+const call = function (event) {
+  return fn.main(event);
+};
+
+/* ---------------- 断言脚手架 ---------------- */
+
+let pass = 0;
+let fail = 0;
+function eq(label, actual, expected) {
+  const a = JSON.stringify(actual);
+  const e = JSON.stringify(expected);
+  if (a === e) {
+    pass++;
+    console.log('  ✓ ' + label);
+  } else {
+    fail++;
+    console.log('  ✗ ' + label + '\n      实际 ' + a + '\n      期望 ' + e);
+  }
+}
+function ok(label, cond) {
+  eq(label, !!cond, true);
+}
+
+function reset() {
+  FC.reset();
+}
+
+function put(rows) {
+  COLLECTIONS.fq_items = rows.map(function (r, i) {
+    return Object.assign({ _id: 'i' + i, order: i * 10 }, r);
+  });
+  return COLLECTIONS.fq_items;
+}
+
+function items() {
+  return COLLECTIONS.fq_items
+    .slice()
+    .sort(function (a, b) {
+      return a.order - b.order;
+    })
+    .map(function (i) {
+      return i._id + ':' + i.order + (i.quad ? ':' + i.quad : '');
+    });
+}
+
+function byId(id) {
+  return COLLECTIONS.fq_items.filter(function (i) {
+    return i._id === id;
+  })[0];
+}
+
+/* ---------------- 用例 ---------------- */
+
+async function run() {
+  const FN_VER = Number(/const FN_VER = (\d+)/.exec(fs.readFileSync(FN_PATH, 'utf8'))[1]);
+
+  console.log('\n[1] reorder：只写提交的那几条，没提交的保持原样');
+  {
+    reset();
+    put([
+      { _openid: 'openid-me', title: 'a', quad: 'q1', catId: 'c1', done: false },
+      { _openid: 'openid-me', title: 'b', quad: 'q1', catId: 'c1', done: false },
+      { _openid: 'openid-me', title: 'c', quad: 'q1', catId: 'c1', done: false },
+    ]);
+    // 提交 2 条：客户端并不总是整段发，只发 order 真的变了的行
+    const r = await call({
+      action: 'reorder',
+      items: [
+        { id: 'i2', order: 0 },
+        { id: 'i0', order: 10 },
+      ],
+    });
+    eq('reorder 成功', r.ok, true);
+    eq('回传更新条数（只改提交的 2 条）', r.data.updated, 2);
+    eq('c 提到最前、a 退到第二', items(), ['i2:0:q1', 'i0:10:q1', 'i1:10:q1']);
+    eq('没提交的 b 保持原 order（提交部分集也不会冲突）', byId('i1').order, 10);
+
+    // 整段重排：这才是客户端拖动时的常规形态（该象限可见列表全部提交）
+    const full = await call({
+      action: 'reorder',
+      items: [
+        { id: 'i2', order: 0 },
+        { id: 'i0', order: 10 },
+        { id: 'i1', order: 20 },
+      ],
+    });
+    eq('整段重排 → 0 / 10 / 20 干净排开', items(), ['i2:0:q1', 'i0:10:q1', 'i1:20:q1']);
+    eq('整段重排更新 3 条', full.data.updated, 3);
+  }
+
+  console.log('\n[2] reorder：跨象限带 quad，顺带改象限');
+  {
+    reset();
+    put([
+      { _openid: 'openid-me', title: 'a', quad: 'q1', catId: 'c1', done: false },
+      { _openid: 'openid-me', title: 'b', quad: 'q3', catId: 'c1', done: false },
+    ]);
+    await call({ action: 'reorder', items: [{ id: 'i0', order: 0, quad: 'q3' }] });
+    eq('象限已搬到 q3', byId('i0').quad, 'q3');
+    eq('order 已写入', byId('i0').order, 0);
+  }
+
+  console.log('\n[3] reorder：不带 quad 时不许动象限（避免误把事项挪走）');
+  {
+    reset();
+    put([{ _openid: 'openid-me', title: 'a', quad: 'q1', catId: 'c1', done: false }]);
+    await call({ action: 'reorder', items: [{ id: 'i0', order: 50 }] });
+    eq('象限保持 q1', byId('i0').quad, 'q1');
+    eq('order 已写入', byId('i0').order, 50);
+  }
+
+  console.log('\n[4] reorder：只认得本人的数据，别人的条目纹丝不动');
+  {
+    reset();
+    put([
+      { _openid: 'openid-me', title: 'mine', quad: 'q1', catId: 'c1', done: false },
+      { _openid: 'openid-other', title: 'other', quad: 'q1', catId: 'c1', done: false },
+    ]);
+    const r = await call({
+      action: 'reorder',
+      items: [
+        { id: 'i0', order: 90 },
+        { id: 'i1', order: 90 },
+      ],
+    });
+    eq('只有本人那条被更新', r.data.updated, 1);
+    eq('本人的 order 变了', byId('i0').order, 90);
+    eq('别人的 order 没动', byId('i1').order, 10);
+  }
+
+  console.log('\n[5] reorder：空数组 / 超上限 / 非法 id');
+  {
+    reset();
+    put([{ _openid: 'openid-me', title: 'a', quad: 'q1', catId: 'c1', done: false }]);
+    eq('空 items → updated 0', (await call({ action: 'reorder', items: [] })).data, { updated: 0 });
+    eq('items 缺失 → updated 0', (await call({ action: 'reorder' })).data, { updated: 0 });
+    eq('全是空 id → updated 0', (await call({ action: 'reorder', items: [{ id: '' }] })).data, { updated: 0 });
+
+    const many = [];
+    for (let i = 0; i < 201; i++) many.push({ id: 'x' + i, order: i });
+    const over = await call({ action: 'reorder', items: many });
+    eq('超过 200 条被拒', over.ok, false);
+    eq('拒绝原因可读', over.msg, '一次最多重排 200 条');
+  }
+
+  console.log('\n[6] 未知 action：回包里带上云端版本号（本次事故的原文）');
+  {
+    reset();
+    const r = await call({ action: 'reorder_typo' });
+    eq('未识别的 action 返回 ok:false', r.ok, false);
+    ok('msg 以「未知 action」开头', /^未知 action: reorder_typo/.test(r.msg));
+    ok('msg 带上云端 FN_VER（v' + FN_VER + '）', r.msg.indexOf('v' + FN_VER) >= 0);
+    ok('msg 给出「重新上传部署」的指引', r.msg.indexOf('重新上传部署') >= 0);
+  }
+
+  console.log('\n[7] bootstrap：握手信息 + 首屏种子');
+  {
+    reset();
+    const r = await call({ action: 'bootstrap' });
+    eq('bootstrap 成功', r.ok, true);
+    eq('带 fnVer（客户端就是拿它握手的）', r.data.fnVer, FN_VER);
+    ok('带 actions 清单', Array.isArray(r.data.actions) && r.data.actions.length >= 9);
+    ok('actions 含 reorder —— 客户端拖动的出口', r.data.actions.indexOf('reorder') >= 0);
+
+    eq('首次进入写入 2 个分类', r.data.categories.length, 2);
+    eq('首次进入写入 5 条示例事项', r.data.items.length, 5);
+    eq('分类顺序：工作 / 生活', r.data.categories.map((c) => c.name), ['工作', '生活']);
+    ok('有一条带提醒时间', r.data.items.filter((i) => i.remindAt).length === 1);
+
+    // 再进一次不该重复播种
+    const again = await call({ action: 'bootstrap' });
+    eq('二次进入不重复播种', again.data.items.length, 5);
+    eq('二次进入分类数不变', again.data.categories.length, 2);
+  }
+
+  console.log('\n[8] addItem：分类归属二次校验');
+  {
+    reset();
+    await call({ action: 'bootstrap' });
+    const catId = COLLECTIONS.fq_categories[0]._id;
+
+    const good = await call({
+      action: 'addItem',
+      item: { title: '写测试', catId: catId, quad: 'q2', priority: 1 },
+    });
+    eq('本人分类 → 成功', good.ok, true);
+    ok('返回新 id', !!good.data._id);
+    const created = COLLECTIONS.fq_items.filter((i) => i._id === good.data._id)[0];
+    eq('落到 q2', created.quad, 'q2');
+    eq('order 用 Date.now() 排到末尾', created.order > 1000, true);
+
+    const bad = await call({
+      action: 'addItem',
+      item: { title: '偷写', catId: '别人的分类', quad: 'q1' },
+    });
+    eq('不存在的分类 → 拒绝', bad.ok, false);
+    eq('拒绝原因可读', bad.msg, '分类不存在');
+
+    const noCat = await call({ action: 'addItem', item: { title: 'x' } });
+    eq('缺分类 → 拒绝', noCat.msg, '缺少分类');
+  }
+
+  console.log('\n[9] updateItem / bulk / clearDone：按 _openid 隔离');
+  {
+    reset();
+    FC.OPENID = 'openid-me';
+    put([
+      { _openid: 'openid-me', title: 'mine', quad: 'q1', catId: 'c1', done: false },
+      { _openid: 'openid-other', title: 'other', quad: 'q1', catId: 'c1', done: false },
+    ]);
+
+    const u = await call({ action: 'updateItem', id: 'i1', patch: { done: true } });
+    eq('改别人的条目 → 一条都没改', u.data.updated, 0);
+
+    const u2 = await call({ action: 'updateItem', id: 'i0', patch: { done: true } });
+    eq('改自己的条目 → 成功', u2.data.updated, 1);
+    ok('doneAt 已写入', byId('i0').doneAt && byId('i0').doneAt.__serverDate);
+
+    const b = await call({ action: 'bulk', op: 'clearDone', quad: 'q1', catId: 'c1' });
+    eq('清已完成只删自己的', b.data.removed, 1);
+    eq('别人的仍在', COLLECTIONS.fq_items.length, 1);
+    eq('剩下的是别人的', COLLECTIONS.fq_items[0]._openid, 'openid-other');
+
+    const badOp = await call({ action: 'bulk', op: 'nope', quad: 'q1', catId: 'c1' });
+    eq('未知批量操作被拒', badOp.msg, '未知批量操作: nope');
+  }
+
+  console.log('\n[10] 没有 OPENID 时一律拒绝（模拟调用链异常）');
+  {
+    reset();
+    FC.OPENID = '';
+    const r = await call({ action: 'bootstrap' });
+    eq('无身份 → ok:false', r.ok, false);
+    eq('无身份 → 提示可读', r.msg, '无法识别用户身份');
+  }
+
+  console.log('\n[11] 家庭：首次进入自动建默认家庭，并把老数据认领进来');
+  {
+    reset();
+    // 老数据：有 _openid、没有 fid —— 这正是升级前线上库里的样子。
+    // 这一步如果漏了，老用户升级后会看到空列表，以为数据丢了。
+    put([
+      { _openid: 'openid-me', title: '老事项 A', quad: 'q1', catId: 'c1', done: false },
+      { _openid: 'openid-me', title: '老事项 B', quad: 'q2', catId: 'c1', done: false },
+    ]);
+    const r = await call({ action: 'bootstrap' });
+
+    eq('bootstrap 成功', r.ok, true);
+    eq('回包里带 family', !!r.data.family, true);
+    eq('我是创建者', r.data.family.isOwner, true);
+    eq('成员只有一个', r.data.family.memberCount, 1);
+    eq('认领了 2 条老数据，没有另外播种', r.data.items.length, 2);
+    eq('老数据都补上了 fid', COLLECTIONS.fq_items.every(function (i) { return !!i.fid; }), true);
+    eq(
+      '两条落在同一个家庭',
+      COLLECTIONS.fq_items[0].fid === COLLECTIONS.fq_items[1].fid,
+      true
+    );
+    eq('家庭表里正好一条', COLLECTIONS.fq_family.length, 1);
+    eq('成员表里正好一条', COLLECTIONS.fq_members.length, 1);
+    eq('成员记录是 active 的', COLLECTIONS.fq_members[0].active, true);
+    eq('成员身份是 owner', COLLECTIONS.fq_members[0].role, 'owner');
+
+    // 再进一次不该重复播种 / 不该又建一个家庭
+    const again = await call({ action: 'bootstrap' });
+    eq('二次进入不重复建家庭', COLLECTIONS.fq_family.length, 1);
+    eq('二次进入事项数不变', again.data.items.length, 2);
+  }
+
+  console.log('\n[12] 越权：归属只认服务端解析出的 fid，客户端传 fid 必须被忽略');
+  {
+    reset();
+    FC.OPENID = 'openid-a';
+    await call({ action: 'bootstrap' });
+    const fidA = COLLECTIONS.fq_family[0]._id;
+    const catA = COLLECTIONS.fq_categories[0]._id;
+    const itemA = COLLECTIONS.fq_items[0]._id;
+
+    FC.OPENID = 'openid-b';
+    await call({ action: 'bootstrap' });
+    const fidB = COLLECTIONS.fq_family[1]._id;
+    ok('两个家庭互不相同', fidA !== fidB);
+
+    // 乙在请求里硬塞甲的 fid —— 云函数用的是管理员权限，
+    // 一旦这里被入参左右，就等于任何人构造一个请求就能读写全部家庭。
+    const bad = await call({ action: 'updateItem', id: itemA, patch: { title: '改掉甲' }, fid: fidA });
+    eq('伪造型改别人的事项 → 一条都没改', bad.data.updated, 0);
+    eq('甲的事项标题没被动', byId(itemA).title === '改掉甲', false);
+
+    const badDel = await call({ action: 'removeItem', id: itemA, fid: fidA });
+    eq('伪造 fid 删别人的事项 → 删不掉', badDel.data.removed, 0);
+
+    const badAdd = await call({
+      action: 'addItem',
+      fid: fidA,
+      item: { title: '塞进甲家', catId: catA, quad: 'q1' },
+    });
+    eq('用别人家的分类新建 → 被拒', badAdd.ok, false);
+    eq('拒绝原因可读', badAdd.msg, '分类不存在');
+
+    const badBulk = await call({ action: 'bulk', op: 'clearQuad', quad: 'q1', catId: catA, fid: fidA });
+    eq('批量删别人家的象限 → 删不掉', badBulk.data.removed, 0);
+
+    const mine = await call({ action: 'bootstrap' });
+    eq('乙看到的仍是自己的家庭', mine.data.family.id, fidB);
+    eq(
+      '乙看不到甲的任何事项',
+      mine.data.items.every(function (i) { return i.fid === fidB; }),
+      true
+    );
+  }
+
+  console.log('\n[13] 邀请码：生成 / 归一化 / 加入 / 复用 / 过期 / 权限');
+  {
+    reset();
+    FC.OPENID = 'openid-a';
+    const bootA = await call({ action: 'bootstrap' });
+    const fidA = bootA.data.family.id;
+    const catA = bootA.data.categories[0]._id;
+
+    const inv = await call({ action: 'genInvite' });
+    eq('创建者能生成邀请码', inv.ok, true);
+    eq('码长 6 位', String(inv.data.inviteCode).length, 6);
+    eq('只用易读字符（没有 0/O/1/I/L）', /^[2-9A-HJKMNP-Z]{6}$/.test(inv.data.inviteCode), true);
+    ok('带 24 小时有效期', inv.data.inviteExpire > Date.now());
+    ok('家庭文档里落了码', COLLECTIONS.fq_family[0].inviteCode === inv.data.inviteCode);
+
+    FC.OPENID = 'openid-b';
+    const bootB = await call({ action: 'bootstrap' });
+    const fidB = bootB.data.family.id;
+
+    const join = await call({
+      action: 'joinFamily',
+      code: ' ' + inv.data.inviteCode.toLowerCase() + ' ',
+    });
+    eq('小写带空格的码也能加入（两边都做归一化）', join.ok, true);
+    eq('切到甲的家庭', join.data.fid, fidA);
+
+    const after = await call({ action: 'bootstrap' });
+    eq('乙现在看到的是甲的家庭', after.data.family.id, fidA);
+    eq('乙看到的正是甲的数据', after.data.items.length, bootA.data.items.length);
+    eq('乙不是创建者', after.data.family.isOwner, false);
+    eq('乙拿不到邀请码（码只回给创建者）', after.data.family.inviteCode, '');
+    eq('成员数是 2', after.data.family.memberCount, 2);
+
+    // 加入之后真的能写对方的数据 —— 这才是整个需求的目的
+    const add = await call({
+      action: 'addItem',
+      item: { title: '妻子加的一条', catId: catA, quad: 'q2' },
+    });
+    eq('成员能在家庭里新建事项', add.ok, true);
+    FC.OPENID = 'openid-a';
+    const aSees = await call({ action: 'sync', rev: -1 });
+    ok(
+      '甲能看到成员新增的这条',
+      aSees.data.items.some(function (i) { return i.title === '妻子加的一条'; })
+    );
+
+    // 甲视角的成员列表
+    const aView = await call({ action: 'bootstrap' });
+    eq('甲看到 2 个成员', aView.data.family.memberCount, 2);
+    eq('成员列表里恰好一个「我」', aView.data.family.members.filter(function (m) { return m.me; }).length, 1);
+    eq('乙在甲的列表里显示为家人', aView.data.family.members.filter(function (m) { return !m.me; })[0].name, '家人');
+    eq('家庭成员信息里不含 openid', JSON.stringify(aView.data.family).indexOf('openid-'), -1);
+
+    // 刷新自己的显示名
+    FC.OPENID = 'openid-b';
+    const named = await call({ action: 'renameMember', name: '小明' });
+    eq('改显示名成功', named.ok, true);
+
+    FC.OPENID = 'openid-a';
+    const aView2 = await call({ action: 'bootstrap' });
+    eq(
+      '甲看到的成员名跟着变了',
+      aView2.data.family.members.filter(function (m) { return !m.me; })[0].name,
+      '小明'
+    );
+
+    const dup = await call({ action: 'joinFamily', code: inv.data.inviteCode });
+    eq('重复加入同一个家庭 → 友好拒绝', dup.ok, false);
+    eq('拒绝原因可读', dup.msg, '你已经在这个家庭里了');
+
+    const noSuch = await call({ action: 'joinFamily', code: 'ZZZZZZ' });
+    eq('不存在的码被拒', noSuch.msg, '邀请码无效');
+
+    const empty = await call({ action: 'joinFamily', code: '   ' });
+    eq('空码被拒', empty.msg, '请输入邀请码');
+
+    // 过期
+    COLLECTIONS.fq_family.forEach(function (f) {
+      if (f._id === fidA) f.inviteExpire = Date.now() - 1000;
+    });
+    FC.OPENID = 'openid-c';
+    await call({ action: 'bootstrap' });
+    const exp = await call({ action: 'joinFamily', code: inv.data.inviteCode });
+    eq('过期码被拒', exp.ok, false);
+    eq('拒绝原因可读', exp.msg, '邀请码已过期，请让对方重新生成');
+
+    // 非创建者不能生成码
+    FC.OPENID = 'openid-b';
+    const cant = await call({ action: 'genInvite' });
+    eq('成员不能生成邀请码', cant.ok, false);
+    eq('拒绝原因可读', cant.msg, '只有家庭创建者可以生成邀请码');
+
+    ok('乙自己那份家庭还留着（没被吞掉）', COLLECTIONS.fq_family.some(function (f) { return f._id === fidB; }));
+  }
+
+  console.log('\n[14] 退出家庭：回到自己的清单，谁的数据都没被删');
+  {
+    reset();
+    FC.OPENID = 'openid-a';
+    await call({ action: 'bootstrap' });
+    const fidA = COLLECTIONS.fq_family[0]._id;
+    const inv = await call({ action: 'genInvite' });
+    const aItems = COLLECTIONS.fq_items.filter(function (i) { return i.fid === fidA; }).length;
+
+    FC.OPENID = 'openid-b';
+    await call({ action: 'bootstrap' });
+    const fidB = COLLECTIONS.fq_family[1]._id;
+    const bItems = COLLECTIONS.fq_items.filter(function (i) { return i.fid === fidB; }).length;
+
+    await call({ action: 'joinFamily', code: inv.data.inviteCode });
+    eq('加入后看甲的家', (await call({ action: 'bootstrap' })).data.family.id, fidA);
+
+    const back = await call({ action: 'leaveFamily' });
+    eq('退出成功', back.ok, true);
+    eq('回到自己的家庭', back.data.fid, fidB);
+    eq('回自己的家时标记为「回到自己的」', back.data.backToOwn, true);
+    eq('首页确实切回来了', (await call({ action: 'bootstrap' })).data.family.id, fidB);
+    eq('自己的事项一条没少', COLLECTIONS.fq_items.filter(function (i) { return i.fid === fidB; }).length, bItems);
+    eq('甲的事项也一条没少', COLLECTIONS.fq_items.filter(function (i) { return i.fid === fidA; }).length, aItems);
+    eq('两个家庭都还在', COLLECTIONS.fq_family.length, 2);
+
+    // 退出后不能在甲家里写了
+    FC.OPENID = 'openid-b';
+    const catA = COLLECTIONS.fq_categories.filter(function (c) { return c.fid === fidA; })[0]._id;
+    const noWrite = await call({ action: 'addItem', item: { title: '偷写', catId: catA, quad: 'q1' } });
+    eq('退出后再往甲家写 → 被拒', noWrite.ok, false);
+    eq('拒绝原因可读', noWrite.msg, '分类不存在');
+
+    FC.OPENID = 'openid-a';
+    const own = await call({ action: 'leaveFamily' });
+    eq('创建者不能退出自己的家庭', own.ok, false);
+    eq('拒绝原因可读', own.msg, '这是你自己的家庭，不能退出');
+  }
+
+  console.log('\n[15] 清空全部数据：共享之后只留给家庭创建者');
+  {
+    reset();
+    FC.OPENID = 'openid-a';
+    await call({ action: 'bootstrap' });
+    const inv = await call({ action: 'genInvite' });
+
+    FC.OPENID = 'openid-b';
+    await call({ action: 'bootstrap' });
+    await call({ action: 'joinFamily', code: inv.data.inviteCode });
+
+    const before = COLLECTIONS.fq_items.length;
+    const denied = await call({ action: 'clearAll' });
+    eq('成员清空全家 → 被拒', denied.ok, false);
+    eq('拒绝原因可读', denied.msg, '只有家庭创建者可以清空整个家庭的数据');
+    eq('一条都没删', COLLECTIONS.fq_items.length, before);
+
+    FC.OPENID = 'openid-a';
+    const okAll = await call({ action: 'clearAll' });
+    eq('创建者可以清空', okAll.ok, true);
+    ok('事项被清空', okAll.data.removed > 0);
+    ok('分类保留', COLLECTIONS.fq_categories.length > 0);
+  }
+
+  console.log('\n[16] 自动同步：rev 没变只回一个数字，变了才把数据带回来');
+  {
+    reset();
+    FC.OPENID = 'openid-a';
+    const boot = await call({ action: 'bootstrap' });
+    const fidA = boot.data.family.id;
+    const rev0 = boot.data.family.rev;
+    eq('bootstrap 带回 rev', typeof rev0, 'number');
+
+    const same = await call({ action: 'sync', rev: rev0 });
+    eq('rev 一致 → changed:false', same.data.changed, false);
+    eq('不带数据回来（省流量）', same.data.items, undefined);
+    eq('rev 原样回传', same.data.rev, rev0);
+
+    // 甲新建一条 → rev 必须前进
+    const cat = boot.data.categories[0]._id;
+    await call({ action: 'addItem', item: { title: '新事项', catId: cat, quad: 'q1' } });
+    const famRow = COLLECTIONS.fq_family.filter(function (f) { return f._id === fidA; })[0];
+    eq('写操作把 rev 推了一格', famRow.rev, rev0 + 1);
+
+    const diff = await call({ action: 'sync', rev: rev0 });
+    eq('rev 变了 → changed:true', diff.data.changed, true);
+    ok('带回了数据', Array.isArray(diff.data.items) && diff.data.items.length > 0);
+    eq('带回新的 rev', diff.data.rev, rev0 + 1);
+
+    // 别人加入，也得能被察觉（成员数变了）
+    const inv = await call({ action: 'genInvite' });
+    const rev1 = COLLECTIONS.fq_family.filter(function (f) { return f._id === fidA; })[0].rev;
+    FC.OPENID = 'openid-b';
+    await call({ action: 'bootstrap' });
+    await call({ action: 'joinFamily', code: inv.data.inviteCode });
+
+    FC.OPENID = 'openid-a';
+    const r2 = await call({ action: 'sync', rev: rev1 });
+    eq('别人加入也推了 rev', r2.data.changed, true);
+    eq('甲看到成员数变成 2', r2.data.family.memberCount, 2);
+
+    // 成员改名同样要能被察觉
+    const rev2 = r2.data.rev;
+    FC.OPENID = 'openid-b';
+    await call({ action: 'renameMember', name: '小明' });
+    FC.OPENID = 'openid-a';
+    const r3 = await call({ action: 'sync', rev: rev2 });
+    eq('成员改名也推了 rev', r3.data.changed, true);
+    eq('名字已更新', r3.data.family.members.filter(function (m) { return !m.me; })[0].name, '小明');
+  }
+
+  console.log('\n[17] 分类删除与改名：空删 / 转移 / 级联 / 兜底');
+  {
+    reset();
+    FC.OPENID = 'openid-a';
+    const boot = await call({ action: 'bootstrap' });
+    const fidA = boot.data.family.id;
+    const cWork = boot.data.categories[0]._id;
+    const cLife = boot.data.categories[1]._id;
+    const catRow = function (id) {
+      return COLLECTIONS.fq_categories.filter(function (c) { return c._id === id; })[0];
+    };
+    const myCats = function () {
+      return COLLECTIONS.fq_categories.filter(function (c) { return c.fid === fidA; });
+    };
+
+    // ---- 改名 ----
+    const ren = await call({ action: 'renameCategory', id: cLife, name: '生活家' });
+    eq('改名成功', ren.ok, true);
+    eq('名字已写入', catRow(cLife).name, '生活家');
+
+    const dup = await call({ action: 'renameCategory', id: cLife, name: '工作' });
+    eq('改成同家庭已有的名字 → 被拒', dup.ok, false);
+    eq('拒绝原因可读', dup.msg, '分类已存在');
+
+    // 这条是在钉「查重不能误伤自己」：点开重命名、原样确定，不该报「已存在」
+    const same = await call({ action: 'renameCategory', id: cLife, name: '生活家' });
+    eq('改成自己原来的名字 → 放行', same.ok, true);
+
+    const blank = await call({ action: 'renameCategory', id: cLife, name: '   ' });
+    eq('空名字 → 被拒', blank.ok, false);
+
+    // ---- 空分类：谁都能删，一次就完 ----
+    const cEmpty = (await call({ action: 'addCategory', name: '空的' })).data._id;
+    const delEmpty = await call({ action: 'removeCategory', id: cEmpty });
+    eq('删空分类成功', delEmpty.ok, true);
+    eq('回传删了 1 个分类', delEmpty.data.removed, 1);
+    eq('没有连带删事项', delEmpty.data.deletedItems, 0);
+    eq('分类确实没了', catRow(cEmpty), undefined);
+    eq('其他分类没被波及', myCats().length, 2);
+
+    // ---- 非空 + moveTo：事项换家，一条不丢 ----
+    const cTmp = (await call({ action: 'addCategory', name: '临时' })).data._id;
+    await call({ action: 'addItem', item: { title: '甲1', catId: cTmp, quad: 'q1' } });
+    await call({ action: 'addItem', item: { title: '甲2', catId: cTmp, quad: 'q2' } });
+    const beforeMove = COLLECTIONS.fq_items.length;
+
+    const mv = await call({ action: 'removeCategory', id: cTmp, moveTo: cWork });
+    eq('带 moveTo 删除成功', mv.ok, true);
+    eq('回传搬走了 2 条', mv.data.moved, 2);
+    eq('回传没删事项', mv.data.deletedItems, 0);
+    eq('事项总数一条没变', COLLECTIONS.fq_items.length, beforeMove);
+    eq('那 2 条已落到「工作」', COLLECTIONS.fq_items.filter(function (i) {
+      return i.catId === cWork && (i.title === '甲1' || i.title === '甲2');
+    }).length, 2);
+    eq('分类本身没了', catRow(cTmp), undefined);
+
+    // moveTo 指向不存在的分类 → 整件事都不做（不能删了分类却把事项留下）
+    const cTmp2 = (await call({ action: 'addCategory', name: '临时2' })).data._id;
+    await call({ action: 'addItem', item: { title: '乙1', catId: cTmp2, quad: 'q1' } });
+    const badDest = await call({ action: 'removeCategory', id: cTmp2, moveTo: 'c-not-exist' });
+    eq('moveTo 指向不存在的分类 → 被拒', badDest.ok, false);
+    eq('拒绝原因可读', badDest.msg, '目标分类不存在');
+    eq('分类还在（失败不留半截状态）', catRow(cTmp2) ? 1 : 0, 1);
+    eq('那 1 条也还在原处', COLLECTIONS.fq_items.filter(function (i) { return i.catId === cTmp2; }).length, 1);
+
+    // ---- 非空 + 不给 moveTo：连事项一起删（服务端自己数出来的，不靠客户端说） ----
+    const cascade = await call({ action: 'removeCategory', id: cTmp2 });
+    eq('级联删除成功', cascade.ok, true);
+    eq('回传删了 1 条事项', cascade.data.deletedItems, 1);
+    eq('那 1 条真的没了', COLLECTIONS.fq_items.filter(function (i) { return i.catId === cTmp2; }).length, 0);
+    eq('分类也没了', catRow(cTmp2), undefined);
+
+    // ---- 兜底：家里至少要留一个分类 ----
+    eq('此时墙上还剩 2 个分类', myCats().length, 2);
+    await call({ action: 'removeCategory', id: myCats()[0]._id });
+    const lastOne = await call({ action: 'removeCategory', id: myCats()[0]._id });
+    eq('删最后一个分类 → 被拒', lastOne.ok, false);
+    eq('拒绝原因可读', lastOne.msg, '至少要保留一个分类');
+    eq('确实还剩一个', myCats().length, 1);
+
+    // ---- 伪造 id ----
+    const noId = await call({ action: 'removeCategory' });
+    eq('不给 id → 被拒', noId.ok, false);
+    const ghost = await call({ action: 'removeCategory', id: 'c-ghost' });
+    eq('不存在的分类 → 被拒', ghost.ok, false);
+    eq('拒绝原因可读', ghost.msg, '分类不存在');
+  }
+
+  console.log('\n[18] 分类分权：成员能删到什么程度 / 跨家庭一律落空');
+  {
+    // ---- 同一家庭里：成员只能删空分类 ----
+    reset();
+    FC.OPENID = 'openid-a';
+    await call({ action: 'bootstrap' });
+    const inv = await call({ action: 'genInvite' });
+
+    FC.OPENID = 'openid-b';
+    await call({ action: 'bootstrap' });
+    await call({ action: 'joinFamily', code: inv.data.inviteCode });
+
+    // 乙现在在甲家。挑一个分类往里塞事项，让它变成「非空」
+    const curFid = COLLECTIONS.fq_members.filter(function (m) {
+      return m._openid === 'openid-b' && m.active;
+    })[0].fid;
+    const shared = COLLECTIONS.fq_categories.filter(function (c) {
+      return c.fid === curFid;
+    })[0]._id;
+    await call({ action: 'addItem', item: { title: '家人录的', catId: shared, quad: 'q1' } });
+
+    const memberDel = await call({ action: 'removeCategory', id: shared });
+    eq('成员删非空分类 → 被拒', memberDel.ok, false);
+    eq('拒绝原因可读', memberDel.msg, '只有家庭创建者可以删除还有事项的分类');
+    eq('分类还在', COLLECTIONS.fq_categories.filter(function (c) { return c._id === shared; }).length, 1);
+
+    const bEmpty = (await call({ action: 'addCategory', name: '乙建的空类' })).data._id;
+    const bDel = await call({ action: 'removeCategory', id: bEmpty });
+    eq('成员删自己建的空分类 → 放行', bDel.ok, true);
+
+    // 成员能改名（和「新增分类」对称）
+    const bRen = await call({ action: 'renameCategory', id: shared, name: '家人改的' });
+    eq('成员改名 → 放行', bRen.ok, true);
+
+    // ---- 跨家庭：乙用甲家的分类 id，一切落空 ----
+    reset();
+    FC.OPENID = 'openid-a';
+    const bootA = await call({ action: 'bootstrap' });
+    const fidA = bootA.data.family.id;
+    const catA0 = bootA.data.categories[0]._id;
+    const catA1 = bootA.data.categories[1]._id;
+
+    FC.OPENID = 'openid-b';
+    await call({ action: 'bootstrap' }); // 乙有自己的家，没有加入甲家
+
+    const steal = await call({ action: 'removeCategory', id: catA0 });
+    eq('乙删甲家的分类 → 被拒', steal.ok, false);
+    eq('拒绝原因可读', steal.msg, '分类不存在');
+    eq('甲家的分类一个没少', COLLECTIONS.fq_categories.filter(function (c) { return c.fid === fidA; }).length, 2);
+
+    const stealRen = await call({ action: 'renameCategory', id: catA0, name: '被改了' });
+    eq('乙改甲家的分类名 → 被拒', stealRen.ok, false);
+    eq('甲家的名字没被动', COLLECTIONS.fq_categories.filter(function (c) { return c._id === catA0; })[0].name, '工作');
+
+    // 乙往 moveTo 里塞甲家的分类 → 目标也不认（否则等于把事项送进别人家）
+    const bCat = (await call({ action: 'addCategory', name: '乙的类' })).data._id;
+    await call({ action: 'addItem', item: { title: '乙的事项', catId: bCat, quad: 'q1' } });
+    const crossDest = await call({ action: 'removeCategory', id: bCat, moveTo: catA1 });
+    eq('moveTo 指向别人家的分类 → 被拒', crossDest.ok, false);
+    eq('拒绝原因可读', crossDest.msg, '目标分类不存在');
+    eq('乙的分类还在', COLLECTIONS.fq_categories.filter(function (c) { return c._id === bCat; }).length, 1);
+    eq('乙的事项也还在原处', COLLECTIONS.fq_items.filter(function (i) { return i.catId === bCat; }).length, 1);
+  }
+
+  console.log('\n[19] 订阅额度：记账 / 防连点 / 封顶 / 跨用户隔离');
+  {
+    const TPL = '1AaZ3iSMfGpplGMUIVArXIPssCKAj2p3hHFxJPpOmlM';
+    reset();
+    FC.OPENID = 'openid-a';
+    const boot = await call({ action: 'bootstrap' });
+
+    eq('bootstrap 带回 sub 信息', typeof boot.data.sub, 'object');
+    eq('初始额度为 0', boot.data.sub.quota, 0);
+    eq('初始未送达为 0', boot.data.sub.missed, 0);
+    // 模板 id 只由服务端下发 —— 客户端硬编码一份的话，换模板时必然漏改
+    eq('模板 id 由服务端下发', boot.data.sub.templateId, TPL);
+    eq('action 清单里多了 grantSub', boot.data.actions.indexOf('grantSub') >= 0, true);
+    eq('action 清单长度 18', boot.data.actions.length, 18);
+    eq('握手版本已升到 5', boot.data.fnVer, 5);
+
+    // ---- 模板必须对得上 ----
+    const wrong = await call({ action: 'grantSub', templateId: 'someone-elses-template' });
+    eq('拿别的模板来记账 → 被拒', wrong.ok, false);
+    eq('拒绝原因可读', wrong.msg, '模板不匹配');
+    const none = await call({ action: 'grantSub' });
+    eq('不带模板 id → 被拒', none.ok, false);
+    eq('两次都没建账本', COLLECTIONS.fq_subs.length, 0);
+
+    // ---- 正常记账 ----
+    const g1 = await call({ action: 'grantSub', templateId: TPL });
+    eq('第一次授权 → 额度 1', g1.data.quota, 1);
+    eq('账本落了库', COLLECTIONS.fq_subs.length, 1);
+    eq('账本上的 openid 由服务端填', COLLECTIONS.fq_subs[0]._openid, 'openid-a');
+
+    // ---- 防连点：间隔太短，当没发生过 ----
+    const fast = await call({ action: 'grantSub', templateId: TPL });
+    eq('连点 → 不记账', fast.data.quota, 1);
+    eq('连点被标记出来', fast.data.tooFast, true);
+    eq('连点不报错（正当的快速保存不该弹错）', fast.ok, true);
+
+    COLLECTIONS.fq_subs[0].lastGrantAt = Date.now() - 60000;
+    const g2 = await call({ action: 'grantSub', templateId: TPL });
+    eq('间隔够了 → 累加到 2', g2.data.quota, 2);
+
+    // ---- 一次授权就是一条，客户端塞多少都不认 ----
+    COLLECTIONS.fq_subs[0].lastGrantAt = Date.now() - 60000;
+    const flood = await call({ action: 'grantSub', templateId: TPL, n: 999, count: 999, quota: 999 });
+    eq('客户端塞 n=999 → 仍然只 +1', flood.data.quota, 3);
+
+    // ---- 封顶 ----
+    COLLECTIONS.fq_subs[0].quota = 50;
+    COLLECTIONS.fq_subs[0].lastGrantAt = Date.now() - 60000;
+    const cap = await call({ action: 'grantSub', templateId: TPL });
+    eq('到顶后不再累加', cap.data.quota, 50);
+    eq('回传标记已封顶', cap.data.capped, true);
+
+    // ---- 跨用户隔离：额度是按人攒的，不是家庭资产 ----
+    FC.OPENID = 'openid-b';
+    const bootB = await call({ action: 'bootstrap' });
+    eq('乙是另一个人 → 自己的额度从 0 起', bootB.data.sub.quota, 0);
+    await call({ action: 'grantSub', templateId: TPL });
+    eq('乙攒的额度不进甲的账', COLLECTIONS.fq_subs.filter(function (d) {
+      return d._openid === 'openid-a';
+    })[0].quota, 50);
+    eq('两个账号各一条账本', COLLECTIONS.fq_subs.length, 2);
+  }
+
+  console.log('\n[20] 推送状态：新建落 false / 改提醒才复位 / 未送达不算错人');
+  {
+    reset();
+    FC.OPENID = 'openid-a';
+    const boot = await call({ action: 'bootstrap' });
+    const catId = boot.data.categories[0]._id;
+
+    const add = await call({
+      action: 'addItem',
+      item: { title: '带提醒的事', catId: catId, quad: 'q1', remindAt: Date.now() + 3600000 },
+    });
+    const it = byId(add.data._id);
+    eq('新建事项带 pushed=false', it.pushed, false);
+    eq('新建事项带 pushOk=false', it.pushOk, false);
+    eq('新建事项带 pushedAt=null', it.pushedAt, null);
+
+    // 模拟 fqRemind 已经处理过这一条（推送成功）
+    it.pushed = true;
+    it.pushOk = true;
+    it.pushErr = '';
+    const sameRemind = it.remindAt;
+
+    await call({ action: 'updateItem', id: it._id, patch: { title: '改个标题', remindAt: sameRemind } });
+    eq('只改标题、提醒没动 → 已推过的不重新排队', byId(it._id).pushed, true);
+
+    await call({ action: 'updateItem', id: it._id, patch: { remindAt: sameRemind + 60000 } });
+    eq('提醒时间变了 → pushed 复位', byId(it._id).pushed, false);
+    eq('pushOk 也复位', byId(it._id).pushOk, false);
+    eq('pushedAt 清空', byId(it._id).pushedAt, null);
+
+    // 白名单之外：客户端直接塞这几个字段，一个字也不许写进去
+    await call({
+      action: 'updateItem',
+      id: it._id,
+      patch: { pushed: true, pushOk: true, pushErr: '伪造', pushedAt: 1 },
+    });
+    eq('客户端改不了 pushed', byId(it._id).pushed, false);
+    eq('客户端改不了 pushOk', byId(it._id).pushOk, false);
+    eq('客户端改不了 pushErr', byId(it._id).pushErr, '');
+
+    // ---- 未送达计数 ----
+    it.pushed = true;
+    it.pushOk = false;
+    const boot2 = await call({ action: 'bootstrap' });
+    eq('没送出去的那条被计进 missed', boot2.data.sub.missed, 1);
+
+    it.pushOk = true;
+    const boot3 = await call({ action: 'bootstrap' });
+    eq('送成功的从 missed 里消失', boot3.data.sub.missed, 0);
+
+    it.pushOk = false;
+    it.done = true;
+    const boot4 = await call({ action: 'bootstrap' });
+    eq('已完成的不算未送达', boot4.data.sub.missed, 0);
+
+    // 种子事项一条都没被算进来（它们压根没有 pushed 字段，
+    // 而「pushed: true」这种等值条件挑不到「字段不存在」的文档）
+    it.done = false;
+    it.pushed = false;
+    const boot5 = await call({ action: 'bootstrap' });
+    eq('没有 pushed 字段的老数据不误报未送达', boot5.data.sub.missed, 0);
+
+    // ---- 别人家的失败不该算在我头上 ----
+    it.pushed = true;
+    it.pushOk = false;
+    FC.OPENID = 'openid-b';
+    const boot6 = await call({ action: 'bootstrap' });
+    eq('别人没送达的不计进我的 missed', boot6.data.sub.missed, 0);
+  }
+
+  console.log('\n----------------------------------------');
+  console.log('通过 ' + pass + ' / 失败 ' + fail);
+  process.exit(fail ? 1 : 0);
+}
+
+run().catch(function (err) {
+  console.log('\n✗ 测试自身抛异常: ' + ((err && err.stack) || err));
+  process.exit(1);
+});

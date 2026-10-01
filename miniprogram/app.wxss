@@ -1,0 +1,64 @@
+/**app.wxss**/
+
+/* ============================================================
+   设计 token（来源：four-quadrant-mobile 设计稿「设计规范」）
+   四象限语义色同时承担「语义」与「可承载白字」两个约束，
+   改动任一值都必须重新验算对比度（当前全部 ≥ 4.5:1，WCAG AA）。
+   ============================================================ */
+page {
+  /* 四象限语义色：Q1 4.72:1 / Q2 4.56:1 / Q3 4.85:1 / Q4 4.84:1 */
+  --q1: #d9303c;
+  --q2: #9e6c00;
+  --q3: #c04e18;
+  --q4: #6b7280;
+
+  /* 中性色 */
+  --ink: #16181c;   /* 正文 / 选中态 */
+  --ink2: #5b6472;  /* 次级文字 */
+  --ink3: #98a0ac;  /* 提示文字 */
+  --line: #e4e7ec;  /* 描边 */
+  --line2: #f1f3f6; /* 分隔 / 卡片底 */
+  --bg: #f4f5f7;    /* 页面底 */
+  --card: #ffffff;
+
+  /* 功能色 */
+  --blue: #2563eb;  /* 主操作 */
+  --ok: #12a150;    /* 完成 */
+
+  background: var(--bg);
+  color: var(--ink);
+  font-family: system-ui, -apple-system, "PingFang SC", "HarmonyOS Sans SC",
+    "Microsoft YaHei", sans-serif;
+  font-size: 28rpx;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 四象限色通过 --qc 单点切换：色块 / 色条 / 头部都读同一个变量 */
+.q1 { --qc: var(--q1); }
+.q2 { --qc: var(--q2); }
+.q3 { --qc: var(--q3); }
+.q4 { --qc: var(--q4); }
+
+view, text, button, input, textarea, scroll-view {
+  box-sizing: border-box;
+}
+
+/* 统一按钮表现：设计稿里的按钮都是纯色块 + 自绘图标 */
+button {
+  background: initial;
+  padding: 0;
+  margin: 0;
+  font-size: inherit;
+  font-family: inherit;
+  line-height: normal;
+  color: inherit;
+  border-radius: 0;
+}
+button:focus { outline: 0; }
+button::after { border: none; }
+
+/* 数字一律等宽，避免计数跳动（设计稿字阶说明） */
+.num {
+  font-variant-numeric: tabular-nums;
+}

@@ -92,7 +92,7 @@
 .appbar .meta {
   display: block;
   font-size: 22rpx;
-  line-height: 1.2;
+  line-height: 2.2;
   color: var(--ink3);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -176,6 +176,24 @@
   border: 2rpx solid rgba(255, 255, 255, 0.5);
   border-radius: 999rpx;
   margin-top: 18rpx;
+}
+
+/* 「图标 + 象限性质胶囊」一行。图标与总览页共用 .qmark（同尺寸 56rpx），
+   到了这里只需要补一个跟胶囊之间的间距。
+   ⚠️ .hintpill 的 margin-top:18rpx 是它「独占一行」时的上方间距，
+   进了 flex 行必须清掉 —— 否则胶囊在行内被顶偏、整行高度虚高一截。 */
+.dhead .dmeta {
+  display: flex;
+  align-items: center;
+  margin-top: 6rpx;
+}
+
+.dhead .dmeta .qmark {
+  margin-right: 16rpx;
+}
+
+.dhead .dmeta .hintpill {
+  margin-top: 0;
 }
 
 /* ---------------- 分类胶囊 ---------------- */
@@ -409,6 +427,61 @@
   line-height: 1.4;
   letter-spacing: 0.06em;
   color: #fff;
+  margin-top: 6rpx;
+}
+
+/* ---------------- 象限图标（白圆底 + 同象限色字形） ----------------
+   字形用**内联 SVG 的 data URI 背景图**，不是 <image> 加载 .svg 文件 ——
+   后者在 Android 上不可靠（见 §4 图标约定），而 data URI 不经过文件协商，
+   WebView 直接按图片渲染，稳。而且一个元素画完，没有内层 <view>，
+   也就没有「图标内 class 撞页面 class」那类风险（见布局铁律第 8 条）。
+   ⚠️ 颜色是**烘焙进 data URI** 的（`%23d9303c` 这类），不是 currentColor / var(--qc)：
+   矢量图在 data URI 里是独立文档，拿不到外部 CSS 变量。
+   所以以后改 app.wxss 的四象限色，必须同步改下面 4 条 URL 里的色值。
+   位置靠祖先类选，WXML 不用传 key：总览卡片是 .q.q1、详情头部是 .dhead.q1，
+   两处都命中同一条规则。 */
+.qrow {
+  display: flex;
+  align-items: center;
+}
+
+.qrow .qname {
+  flex: 1 1 auto;
+  min-width: 0;   /* 不清掉 min-width:auto，长名字会把图标挤出卡片 */
+}
+
+/* 56rpx 圆 = 28px（≈ 设计稿 28px 圆），字形 32rpx 居中；
+   flex-basis 必须跟 width 一起写，否则这个 flex item 的宽仍是默认值
+   （改自绘图标尺寸时必须连 flex-basis 一起改，见布局铁律第 4 条）。 */
+.qmark {
+  flex: 0 0 56rpx;
+  width: 56rpx;
+  height: 56rpx;
+  border-radius: 50%;
+  background-color: #fff;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 32rpx 32rpx;
+}
+
+.qrow .qmark {
+  margin-right: 16rpx;
+}
+
+.q1 .qmark {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23d9303c' d='M13.5.67s.74 2.65.74 4.8c0 2.06-1.35 3.73-3.41 3.73-2.07 0-3.63-1.67-3.63-3.73l.03-.36C5.21 7.51 4 10.62 4 14c0 4.42 3.58 8 8 8s8-3.58 8-8C20 8.61 17.41 3.8 13.5.67zM11.71 19c-1.78 0-3.22-1.4-3.22-3.14 0-1.62 1.05-2.76 2.81-3.12 1.77-.36 3.6-1.21 4.62-2.58.39 1.29.59 2.65.59 4.04 0 2.65-2.15 4.8-4.8 4.8z'/%3E%3C/svg%3E");
+}
+
+.q2 .qmark {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%239e6c00' d='M14 2 5 13h6l-1 9 9-11h-6l1-9z'/%3E%3C/svg%3E");
+}
+
+.q3 .qmark {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cellipse cx='12' cy='8.8' rx='6.3' ry='6.6' fill='%23c04e18'/%3E%3Crect x='9.3' y='15.2' width='5.4' height='2.4' rx='1.2' fill='%23c04e18'/%3E%3Crect x='10.2' y='18.6' width='3.6' height='2' rx='1' fill='%23c04e18'/%3E%3C/svg%3E");
+}
+
+.q4 .qmark {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%236b7280' d='M4 10.2h11v4.4a4.4 4.4 0 0 1-4.4 4.4h-2.2A4.4 4.4 0 0 1 4 14.6z'/%3E%3Cpath fill='none' stroke='%236b7280' stroke-width='1.7' d='M15.4 11.6h1.5a2.5 2.5 0 0 1 0 5h-1.5'/%3E%3Cpath fill='none' stroke='%236b7280' stroke-width='1.6' stroke-linecap='round' d='M8.2 4.6c.9 1-.8 1.8.1 2.9M11.4 4.6c.9 1-.8 1.8.1 2.9'/%3E%3C/svg%3E");
 }
 
 .qnum {
@@ -1260,7 +1333,8 @@
   color: var(--ink2);
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  /* justify-content: flex-end; */
+  width: 120rpx;
 }
 
 .rowline .pick.right .ico-chev-r {

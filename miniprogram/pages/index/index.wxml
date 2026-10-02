@@ -143,9 +143,14 @@
           <view class="ico ico-dots"><view class="d"></view><view class="d"></view><view class="d"></view></view>
         </view>
       </view>
+      <!-- 图标 + 象限性质胶囊一行，数字与「项待办」说明在其下。
+           图标与总览页共用同一个 .qmark，靠 .dhead.q1 这类祖先类选字形。 -->
+      <view class="dmeta">
+        <view class="qmark"></view>
+        <view class="hintpill">{{quadHint}}</view>
+      </view>
       <view class="big num">{{quadUndone}}</view>
       <text class="cap">{{quadCap}}</text>
-      <view class="hintpill">{{quadHint}}</view>
     </view>
 
     <view class="filters {{sortMode?'lock':''}}">
@@ -215,7 +220,13 @@
             bindtap="onOpenQuad"
           >
             <view class="qtop">
-              <text class="qname">{{item.name}}</text>
+              <!-- 图标与象限名同一行；白圆底 + 同象限色字形。
+                   字形（火焰 / 闪电 / 灯泡 / 咖啡杯）按 .q1~.q4 祖先类选，
+                   所以这里不需要传 key —— 卡片本身就是 .q.q1 这样带象限类的。 -->
+              <view class="qrow">
+                <view class="qmark"></view>
+                <text class="qname">{{item.name}}</text>
+              </view>
               <text class="qhint">{{item.hint}}</text>
             </view>
             <view class="qnum num">{{item.count}}</view>

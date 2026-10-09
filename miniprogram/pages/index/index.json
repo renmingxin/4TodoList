@@ -2,5 +2,19 @@
   "navigationStyle": "custom",
   "backgroundColor": "#F4F5F7",
   "disableScroll": true,
-  "usingComponents": {}
+  "usingComponents": {
+    "fq-appbar": "/components/fq-appbar/fq-appbar",
+    "fq-stats": "/components/fq-stats/fq-stats",
+    "fq-fab": "/components/fq-fab/fq-fab",
+    "fq-sortdone": "/components/fq-sortdone/fq-sortdone",
+    "fq-bottombar": "/components/fq-bottombar/fq-bottombar",
+    "fq-tabbar": "/components/fq-tabbar/fq-tabbar",
+    "fq-dhead": "/components/fq-dhead/fq-dhead",
+    "fq-cats": "/components/fq-cats/fq-cats",
+    "fq-quad": "/components/fq-quad/fq-quad",
+    "fq-filters": "/components/fq-filters/fq-filters",
+    "fq-water": "/components/fq-water/fq-water",
+    "fq-cal": "/components/fq-cal/fq-cal",
+    "fq-plan": "/components/fq-plan/fq-plan"
+  }
 }

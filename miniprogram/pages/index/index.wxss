@@ -3,10 +3,15 @@
    设计稿：four-quadrant-mobile（375 × 780 画布）
    换算规则：设计稿 px × 2 = rpx（750rpx = 屏宽）
    ------------------------------------------------------------
-   布局模型：.screen 是纵向 flex，中间的 .scroller 用 flex:1 吃掉剩余高度。
-   所以底部 tab / 主按钮是「天然贴底」的，不再依赖 JS 测量屏幕高度 ——
-   早期版本靠 scrollerH 撑位置，Android 上 screenHeight 含虚拟导航栏，
-   算出来偏大就会把 tabbar 顶出屏幕（表现为 tab 不贴底、图标被压扁）。
+   布局模型：.screen 是纵向 flex，中间那块（详情/全部/我的用 .scroller，
+   总览页用 .ovbody，日程页用 .schedwrap）用 flex:1 吃掉剩余高度。所以底部
+   tab / 主按钮是「天然贴底」的，不再依赖 JS 测量屏幕高度 —— 早期版本靠
+   scrollerH 撑位置，Android 上 screenHeight 含虚拟导航栏，算出来偏大就会把
+   tabbar 顶出屏幕（表现为 tab 不贴底、图标被压扁）。
+   总览页由此实现「一屏刚好装完、不滚动」：矩阵自适应撑满、饮水卡按内容高，
+   屏幕变矮也只是矩阵变矮（见下方 .ovbody 段）。
+   日程页同理，但把「固定」用在月历上：月历不伸不缩，日期头+计划卡+当天事项
+   一起在 .schbody 里滚（见下方 .schedwrap 段）。
    ------------------------------------------------------------
    头部固定：详情页的 dhead + filters + sortrow + swipecue、全部页的
    sortrow + swipecue，全部写在 .scroller **之外**，是 .screen 的固定子项
@@ -66,265 +71,7 @@
   background: transparent;
 }
 
-/* ---------------- 顶部应用栏（总览 / 全部 / 我的） ---------------- */
 
-.appbar {
-  flex: 0 0 auto;
-  height: 88rpx;
-  padding: 0 32rpx;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.appbar-text {
-  flex: 1;
-  min-width: 0;
-}
-
-.appbar .h2 {
-  font-size: 42rpx;
-  font-weight: 600;
-  line-height: 1.15;
-  letter-spacing: -0.015em;
-}
-
-.appbar .meta {
-  display: block;
-  font-size: 22rpx;
-  line-height: 2.2;
-  color: var(--ink3);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 顶栏右侧图标按钮（避让胶囊：right 由 capsuleReserve 在内联 style 上给） */
-.iconbtn {
-  width: 64rpx;
-  height: 64rpx;
-  flex: 0 0 64rpx;
-  border-radius: 20rpx;
-  border: 2rpx solid var(--line);
-  background: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--ink2);
-}
-
-/* ---------------- 详情页顶部导航（颜色随象限） ---------------- */
-
-.dhead {
-  flex: 0 0 auto;
-  padding: 4rpx 32rpx 36rpx;
-  color: #fff;
-}
-
-.dhead .bar {
-  height: 88rpx;
-  display: flex;
-  align-items: center;
-}
-
-.dhead .bar .h3 {
-  flex: 1;
-  min-width: 0;
-  font-size: 32rpx;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  margin: 0 12rpx;
-}
-
-.dhead .bar-btn {
-  width: 60rpx;
-  height: 60rpx;
-  flex: 0 0 60rpx;
-  border-radius: 18rpx;
-  background: rgba(255, 255, 255, 0.16);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-}
-
-.dhead .big {
-  font-size: 68rpx;
-  font-weight: 600;
-  line-height: 1;
-  letter-spacing: -0.03em;
-  margin-top: 12rpx;
-  font-variant-numeric: tabular-nums;
-}
-
-.dhead .cap {
-  display: block;
-  font-size: 23rpx;
-  margin-top: 8rpx;
-  color: #fff;
-}
-
-.dhead .hintpill {
-  display: inline-block;
-  font-size: 20rpx;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  padding: 6rpx 16rpx;
-  border: 2rpx solid rgba(255, 255, 255, 0.5);
-  border-radius: 999rpx;
-  margin-top: 18rpx;
-}
-
-/* 「图标 + 象限性质胶囊」一行。图标与总览页共用 .qmark（同尺寸 56rpx），
-   到了这里只需要补一个跟胶囊之间的间距。
-   ⚠️ .hintpill 的 margin-top:18rpx 是它「独占一行」时的上方间距，
-   进了 flex 行必须清掉 —— 否则胶囊在行内被顶偏、整行高度虚高一截。 */
-.dhead .dmeta {
-  display: flex;
-  align-items: center;
-  margin-top: 6rpx;
-}
-
-.dhead .dmeta .qmark {
-  margin-right: 16rpx;
-}
-
-.dhead .dmeta .hintpill {
-  margin-top: 0;
-}
-
-/* ---------------- 分类胶囊 ---------------- */
-
-/* 整行是 flex：右侧「+」是固定宽度的独立一列，左侧胶囊区 flex:1 + min-width:0
-   自己横向滚动。这样分类再多，新增入口也永远钉在右边。
-   （min-width:0 不能省：flex item 默认 min-width:auto，会被内容顶宽，滚不起来的正是它。） */
-.catsrow {
-  flex: 0 0 auto;
-  height: 88rpx;
-  padding: 28rpx 32rpx 0;
-  display: flex;
-  align-items: flex-start;
-}
-
-/* scroll-view 只负责横向滚动，不承担 flex 布局。
-   ⚠️ 不要在 scroll-view 上写 display:flex 指望胶囊变成 flex item ——
-   实测（截图 531×73 像素测量）胶囊仍按行内盒排在文字基线上：
-   真实位置比内容框高出约 13px，顶部被 overflow:hidden 削平，
-   表现为「标签块被遮挡、文字不在中间」。
-   正解：把 flex 容器放进 scroll-view 里（.cats-inner），
-   块级 flex 容器没有基线对齐问题，子项就是老老实实的 flex item。 */
-.cats {
-  flex: 1 1 auto;
-  min-width: 0;
-  height: 60rpx;
-}
-
-/* width:max-content 让内容有多宽就铺多宽（横向滚动的关键）；
-   引擎不支持时该声明被忽略，退回 block 的 100% 宽 + 子项溢出，同样可滚。 */
-.cats-inner {
-  display: flex;
-  align-items: center;
-  height: 60rpx;
-  width: max-content;
-}
-
-.cats-add {
-  flex: 0 0 auto;
-  width: 60rpx;
-  height: 60rpx;
-  margin-left: 14rpx;
-  border-radius: 999rpx;
-  border: 2rpx dashed var(--line);
-  background: #fff;
-  color: var(--ink3);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.cat {
-  flex: 0 0 auto;
-  height: 60rpx;
-  padding: 0 26rpx;
-  margin-right: 14rpx;
-  border-radius: 999rpx;
-  border: 2rpx solid var(--line);
-  background: #fff;
-  color: var(--ink2);
-  font-size: 26rpx;
-  display: inline-flex;
-  align-items: center;
-  line-height: 1;
-}
-
-.cat .cnt {
-  font-size: 22rpx;
-  opacity: 0.65;
-  margin-left: 10rpx;
-  font-variant-numeric: tabular-nums;
-}
-
-.cat.on {
-  background: var(--ink);
-  border-color: var(--ink);
-  color: #fff;
-}
-
-/* ---------------- 统计条 ---------------- */
-
-.stats {
-  flex: 0 0 auto;
-  height: 112rpx;
-  padding: 24rpx 32rpx 0;
-  display: flex;
-}
-
-.stat {
-  flex: 1;
-  min-width: 0;
-  background: #fff;
-  border: 2rpx solid var(--line);
-  border-radius: 20rpx;
-  padding: 12rpx 8rpx;
-  text-align: center;
-  margin-right: 12rpx;
-  /* ⚠️ text-align:center 只管左右。上下方向：.stat 是 flex item，默认 stretch
-     会被拉到 .stats 的整高，而「数字 + 标题」只有 62rpx ——
-     总览页 .stats 有 24rpx 上内边距，垫得刚刚好，看不出来；
-     「我的」页 .stats.flat 把内边距清零，多出来的 26rpx 全落在下面，
-     整块就贴顶了，看着没有上下居中。
-     改用纵向 flex 居中：不再依赖外层内边距刚好凑够高度，两种视图都对。 */
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-}
-
-.stat:last-child {
-  margin-right: 0;
-}
-
-.stat .v {
-  font-size: 30rpx;
-  font-weight: 600;
-  line-height: 1.2;
-  font-variant-numeric: tabular-nums;
-}
-
-.stat .k {
-  font-size: 20rpx;
-  line-height: 1.3;
-  color: var(--ink3);
-}
-
-/* 我的页复用同一个统计条组件，只是去掉外层留白 */
-.stats.flat {
-  padding: 0;
-  margin-bottom: 24rpx;
-}
 
 /* ---------------- 滚动区 ---------------- */
 
@@ -350,196 +97,177 @@
   padding: 0;
 }
 
-/* ---------------- 四象限矩阵 ---------------- */
-
-/* 四象限矩阵：两列严格等宽。
-   ⚠️ 不要用 grid 的 `1fr 1fr`：1fr 等价于 minmax(auto, 1fr)，这个 auto 下限取
-   内容的 min-content，而 .gi .tx 是 white-space:nowrap，长标题会把所在列顶宽。
-   实测就是这样：左列 215px / 右列 275px（右列被 q4 的长标题撑开），且整体溢出 0.5px。
-   改用 flex：基准固定 50% - 7rpx，两列合计恰好留出 14rpx 列间距。
-   间距用 margin 而非 flex gap（旧 Android WebView 对 gap 支持不稳）。 */
-.grid {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;   /* 两列分别贴齐左右边距，中间自动留出 14rpx */
-}
-
-/* 尺寸恒定：宽 = 50% - 7rpx（两列 + 14rpx 间距 = 100%，不会换行），高 476rpx。
-   注意全局 box-sizing 是 border-box（app.wxss 里统一设的），476rpx 已包含上下 padding。
-   min-width:0 是必须的：不清掉 flex 的 min-width:auto，长标题照样能把这一块顶宽，
-   等分立刻失效。flex 的 0 0 保证「不放大、不收缩」。 */
-.q {
-  flex: 0 0 calc(50% - 7rpx);
-  min-width: 0;
-  height: 476rpx;
-  margin-bottom: 14rpx;
-  padding: 26rpx 24rpx 22rpx;
-  background: var(--qc);
-  color: #fff;
-  border-radius: 24rpx;
+/* ---------------- 总览页主体：一屏装满（不滚动） ----------------
+   总览页没有长列表，所以它**不套 scroll-view**，本身作为 .screen 的一个
+   flex item 吃掉剩余高度 —— 和 .scroller 是同一个机制，底部 tab 照样天然贴底。
+   内部一列：矩阵容器 flex:1（自适应撑满），饮水卡 flex:0 0 auto（按内容高）。
+   这样「屏幕刚好装完」是 flex 分配出来的**结果**，不是拿尺子量出来的巧合：
+   屏幕变矮 → 矩阵跟着变矮，不会冒出滚动条。
+   ⚠️ 两条 min-height:0 都不能省 —— flex item 的 min-height 默认是 auto，
+      内容会把容器撑高并顶出屏幕，正好毁掉这条设计。 */
+.ovbody {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+  padding: 24rpx 32rpx;
+  overflow: hidden;   /* 兜底：极窄屏下宁可裁掉矩阵底部，也不让它盖住 tabbar */
+}
+
+/* 矩阵容器：吃掉除饮水卡外的全部剩余高度。
+   它同时也是「矩阵高度算得出来」的前提 —— 组件里的 .grid.fill 是百分比高度，
+   需要一个确定高度的父容器才能解析（见 fq-quad.wxss 的自适应段）。 */
+.ovgrid {
+  flex: 1 1 auto;
+  min-height: 0;
+  /* 悬浮新建按钮的定位参照系。
+     fq-fab 是 virtualHost 组件、没有自己的节点，.fab 直接成为 .ovgrid 的子节点；
+     这里不设 relative 的话，它会一路找到 .screen（position:fixed）上去，
+     又变回「距屏幕底」的坐标 —— 矮屏上就会压住下面的饮水条（2026-10-09 修的）。
+     矩阵高是 flex 分出来的，所以这两个坐标天然跟着矩阵走。 */
   position: relative;
-  text-align: left;
 }
 
-/* 第二行：不再留底边距，避免矩阵下方多出一截空隙 */
-.q.nb {
-  margin-bottom: 0;
+/* 饮水卡：不拉伸、也不被压缩（内容就固定那么高），只负责与矩阵拉开间距 */
+.ovwater {
+  flex: 0 0 auto;
+  margin-top: 24rpx;
 }
 
-/* 外角 24px、内角 12px：四块拼合后整体轮廓是 24px 圆角矩形，中心缝隙成十字 */
-.q.q1 { border-radius: 48rpx 24rpx 24rpx 24rpx; }
-.q.q2 { border-radius: 24rpx 48rpx 24rpx 24rpx; }
-.q.q3 { border-radius: 24rpx 24rpx 24rpx 48rpx; }
-.q.q4 { border-radius: 24rpx 24rpx 48rpx 24rpx; }
 
-/* 点击反馈只用「不改变尺寸」的方式。
-   早期用的 transform: scale(0.975) 会让象限看起来缩水，与「四块恒定等大」冲突。 */
-.q:active {
-  opacity: 0.9;
-}
+/* ---------------- 日程页（第 2 个 Tab） ---------------- */
 
-/* 象限内部三块不参与压缩：内容多时也不许把标题和数字挤扁 */
-.qtop,
-.qnum,
-.qlist {
-  flex-shrink: 0;
-}
-
-.qtop {
+/* 与总览页同构：固定块不伸不缩，滚动块 flex:1 吃掉剩余高度。
+   这一层之所以存在（而不是直接把 fq-cal / scroll-view 摆进 .screen），
+   是为了让「月历固定、其余滚动」这条切分有个明确的归属，
+   而不是散在若干兄弟节点上靠顺序暗示。 */
+.schedwrap {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
-.qname {
-  display: block;
-  font-size: 28rpx;
-  font-weight: 600;
-  line-height: 1.3;
-  letter-spacing: -0.01em;
+/* 月历固定在顶部，不随列表滚走 —— 点日期是这一页的核心动作，
+   日历被滚走之后想换一天就得先滚回去（见 WXML 里的说明）。 */
+.schcal {
+  flex: 0 0 auto;
+  padding: 24rpx 32rpx 0;
 }
 
-.qhint {
-  display: block;
-  font-size: 20rpx;
-  font-weight: 600;
-  line-height: 1.4;
-  letter-spacing: 0.06em;
-  color: #fff;
-  margin-top: 6rpx;
+/* 日期头 + 两张计划卡 + 当天事项，一起滚。
+   min-height:0 与 .scroller 同理：没有它，flex item 会被内容撑大，滚动失效。
+   padding 直接写在 scroll-view 上（与设计稿的 .scroller 一致）。 */
+.schbody {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 0 32rpx 24rpx;
 }
 
-/* ---------------- 象限图标（白圆底 + 同象限色字形） ----------------
-   字形用**内联 SVG 的 data URI 背景图**，不是 <image> 加载 .svg 文件 ——
-   后者在 Android 上不可靠（见 §4 图标约定），而 data URI 不经过文件协商，
-   WebView 直接按图片渲染，稳。而且一个元素画完，没有内层 <view>，
-   也就没有「图标内 class 撞页面 class」那类风险（见布局铁律第 8 条）。
-   ⚠️ 颜色是**烘焙进 data URI** 的（`%23d9303c` 这类），不是 currentColor / var(--qc)：
-   矢量图在 data URI 里是独立文档，拿不到外部 CSS 变量。
-   所以以后改 app.wxss 的四象限色，必须同步改下面 4 条 URL 里的色值。
-   位置靠祖先类选，WXML 不用传 key：总览卡片是 .q.q1、详情头部是 .dhead.q1，
-   两处都命中同一条规则。 */
-.qrow {
+/* 选中日那一行：'10月9日 周五' +「今天」胶囊 + 右侧项数 */
+.dayh {
   display: flex;
   align-items: center;
+  padding: 20rpx 4rpx 18rpx;
 }
 
-.qrow .qname {
-  flex: 1 1 auto;
-  min-width: 0;   /* 不清掉 min-width:auto，长名字会把图标挤出卡片 */
-}
-
-/* 56rpx 圆 = 28px（≈ 设计稿 28px 圆），字形 32rpx 居中；
-   flex-basis 必须跟 width 一起写，否则这个 flex item 的宽仍是默认值
-   （改自绘图标尺寸时必须连 flex-basis 一起改，见布局铁律第 4 条）。 */
-.qmark {
-  flex: 0 0 56rpx;
-  width: 56rpx;
-  height: 56rpx;
-  border-radius: 50%;
-  background-color: #fff;
-  background-repeat: no-repeat;
-  background-position: center;
-  background-size: 32rpx 32rpx;
-}
-
-.qrow .qmark {
-  margin-right: 16rpx;
-}
-
-.q1 .qmark {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23d9303c' d='M13.5.67s.74 2.65.74 4.8c0 2.06-1.35 3.73-3.41 3.73-2.07 0-3.63-1.67-3.63-3.73l.03-.36C5.21 7.51 4 10.62 4 14c0 4.42 3.58 8 8 8s8-3.58 8-8C20 8.61 17.41 3.8 13.5.67zM11.71 19c-1.78 0-3.22-1.4-3.22-3.14 0-1.62 1.05-2.76 2.81-3.12 1.77-.36 3.6-1.21 4.62-2.58.39 1.29.59 2.65.59 4.04 0 2.65-2.15 4.8-4.8 4.8z'/%3E%3C/svg%3E");
-}
-
-.q2 .qmark {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%239e6c00' d='M14 2 5 13h6l-1 9 9-11h-6l1-9z'/%3E%3C/svg%3E");
-}
-
-.q3 .qmark {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cellipse cx='12' cy='8.8' rx='6.3' ry='6.6' fill='%23c04e18'/%3E%3Crect x='9.3' y='15.2' width='5.4' height='2.4' rx='1.2' fill='%23c04e18'/%3E%3Crect x='10.2' y='18.6' width='3.6' height='2' rx='1' fill='%23c04e18'/%3E%3C/svg%3E");
-}
-
-.q4 .qmark {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%236b7280' d='M4 10.2h11v4.4a4.4 4.4 0 0 1-4.4 4.4h-2.2A4.4 4.4 0 0 1 4 14.6z'/%3E%3Cpath fill='none' stroke='%236b7280' stroke-width='1.7' d='M15.4 11.6h1.5a2.5 2.5 0 0 1 0 5h-1.5'/%3E%3Cpath fill='none' stroke='%236b7280' stroke-width='1.6' stroke-linecap='round' d='M8.2 4.6c.9 1-.8 1.8.1 2.9M11.4 4.6c.9 1-.8 1.8.1 2.9'/%3E%3C/svg%3E");
-}
-
-.qnum {
-  font-size: 60rpx;
+.dayh .d {
+  font-size: 30rpx;
   font-weight: 600;
-  line-height: 1;
-  letter-spacing: -0.03em;
-  margin-top: 20rpx;
+  letter-spacing: -0.01em;
   font-variant-numeric: tabular-nums;
 }
 
-.qlist {
-  margin-top: auto;
-  padding-top: 20rpx;
-}
-
-.gi {
-  display: flex;
-  align-items: flex-start;
-  font-size: 23rpx;
-  line-height: 1.4;
+.dayh .now {
+  margin-left: 16rpx;
+  padding: 5rpx 14rpx;
+  border-radius: 999rpx;
+  background: var(--ink);
   color: #fff;
-  margin-bottom: 10rpx;
+  font-size: 20rpx;
+  font-weight: 600;
 }
 
-.gi:last-child {
-  margin-bottom: 0;
+/* margin-left:auto 把项数推到最右 —— 中间那个「今天」胶囊出现与否都不影响它 */
+.dayh .r {
+  margin-left: auto;
+  font-size: 22rpx;
+  color: var(--ink3);
 }
 
-.gi .dot {
-  flex: 0 0 6rpx;
-  width: 6rpx;
-  height: 6rpx;
-  border-radius: 4rpx;
+/* 「这天的事项」的分节标题：文字 + 一条拉到右边的细线 */
+.dsec {
+  display: flex;
+  align-items: center;
+  padding: 20rpx 4rpx 16rpx;
+  font-size: 22rpx;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--ink3);
+}
+
+.dsec .ln {
+  flex: 1;
+  height: 2rpx;
+  margin-left: 16rpx;
+  background: var(--line);
+}
+
+/* 当天事项的一行。圆点直接读全局的 .q1~.q4 —— 那四个类把 --qc 指向象限色，
+   所以这里只写「用 --qc」，不必把四种颜色再抄一遍（抄了就会有两份色值）。 */
+.minirow {
+  display: flex;
+  align-items: center;
+  padding: 18rpx 24rpx;
+  margin-bottom: 14rpx;
   background: #fff;
-  margin-top: 12rpx;
-  margin-right: 12rpx;
+  border: 2rpx solid var(--line);
+  border-radius: 22rpx;
+  font-size: 25rpx;
 }
 
-.gi .tx {
+.minirow .qq {
+  flex: 0 0 12rpx;
+  width: 12rpx;
+  height: 12rpx;
+  border-radius: 50%;
+  background: var(--qc, var(--ink3));
+}
+
+/* min-width:0：不清掉 flex 的 min-width:auto，长标题会把右侧时刻顶出卡片，
+   省略号也永远不生效（与 .qrow .qname 是同一条坑）。 */
+.minirow .tt {
   flex: 1;
   min-width: 0;
+  margin-left: 18rpx;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.gempty {
-  font-size: 23rpx;
-  line-height: 1.5;
-  color: #fff;
-  opacity: 0.92;
+.minirow .tt.dn {
+  color: var(--ink3);
+  text-decoration: line-through;
 }
 
-.gempty .s {
-  display: block;
+.minirow .pp {
+  flex: 0 0 auto;
+  margin-left: 16rpx;
   font-size: 21rpx;
+  font-weight: 600;
+  color: var(--ink3);
+  font-variant-numeric: tabular-nums;
 }
+
+/* 空态：这句话同时是这块内容的说明书（说清「带提醒的」这个口径） */
+.dempty {
+  display: block;
+  padding: 8rpx 4rpx 20rpx;
+  font-size: 23rpx;
+  color: var(--ink3);
+}
+
 
 /* 「全部」页的象限分段 */
 /* 负 margin + 等值 padding：高亮时背景能溢出到卡片两侧一点，不选中时不占额外空间 */
@@ -607,9 +335,12 @@
   letter-spacing: 0.02em;
 }
 
-/* 排序入口下面那行提示（详情页 / 全部页）改左对齐：
+/* 排序入口下面那行提示（只剩详情页 / 全部页两个使用点）改左对齐：
    上一行「拖动卡片…」在 .sortrow 里从 32rpx 起排，这一行必须跟它同一个左边缘，
-   否则上左下一中，看着像两块互不相干的东西。总览页的矩阵说明没挂 .left，保持居中。 */
+   否则上左下一中，看着像两块互不相干的东西。
+   （总览页那条「矩阵按…」说明已删：那一页现在一屏装满，不留提示行。
+     所以 .swipecue 的居中样式当前没有使用点了，留着是因为它描述的是
+     「提示行」这个元素的默认形态，删掉反而让 .left 变成不可读的差异。） */
 .swipecue.left {
   text-align: left;
   padding: 0 32rpx;
@@ -621,31 +352,6 @@
   color: rgba(255, 255, 255, 0.72);
 }
 
-/* ---------------- 详情筛选 ---------------- */
-
-.filters {
-  flex: 0 0 auto;
-  padding: 24rpx 32rpx 8rpx;
-  display: flex;
-}
-
-.f {
-  font-size: 24rpx;
-  padding: 10rpx 24rpx;
-  margin-right: 14rpx;
-  border-radius: 999rpx;
-  border: 2rpx solid var(--line);
-  background: #fff;
-  color: var(--ink2);
-  font-variant-numeric: tabular-nums;
-  line-height: 1.4;
-}
-
-.f.on {
-  background: var(--ink);
-  border-color: var(--ink);
-  color: #fff;
-}
 
 /* ---------------- 排序模式（详情 / 全部） ----------------
    进入方式：列表上方的「调整顺序」按钮。
@@ -691,47 +397,8 @@
   margin-right: 10rpx;
 }
 
-/* 排序模式下被「锁住」的区域：看得见、点不动 */
-.lock {
-  pointer-events: none;
-  opacity: 0.4;
-}
 
 /* 排序模式下的底部固定条（替代底栏 / Tab） */
-.sortdone {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 16rpx 32rpx;
-  padding-bottom: calc(16rpx + env(safe-area-inset-bottom));
-  background: #fff;
-  border-top: 2rpx solid var(--line);
-}
-
-.sortdone .sd-hint {
-  flex: 1;
-  min-width: 0;
-  font-size: 21rpx;
-  line-height: 1.4;
-  color: var(--ink2);
-}
-
-.sortdone .sd-btn {
-  flex: 0 0 auto;
-  margin-left: 20rpx;
-  height: 72rpx;
-  padding: 0 34rpx;
-  border-radius: 999rpx;
-  background: var(--blue);
-  color: #fff;
-  font-size: 26rpx;
-  font-weight: 500;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
 /* ---------------- 事项卡片（左滑露出操作） ---------------- */
 
 .rows-wrap {
@@ -938,6 +605,52 @@
 .tag.cat { background: #eff4ff; color: var(--blue); }
 .tag.time { background: #ecfdf3; color: #0b7a3c; }
 
+/* ---------------- 事项进度条 ----------------
+   轨道 / 横杆 / 填充 / 圆点**整段复用 app.wxss 的共享块**（今日饮水卡同款：
+   轨道 14rpx、圆点 32rpx、触区 48rpx）。这里只补三件本卡片自己的事：
+   它在卡片里的排版、它读哪个颜色、以及右侧那个读数。 */
+
+.prog {
+  display: flex;
+  align-items: center;
+  margin-top: 14rpx; /* 与 .tags 同一个呼吸节奏 */
+
+  /* ⚠️ 颜色的唯一入口：填充与圆点描边都读 var(--wt)。
+     --qc 由 .row 上的 q1~q4 类给出（app.wxss），所以进行中的进度条自然长成
+     所属象限的颜色 —— 与左侧色条、详情页底色读的是同一个值。
+     改颜色只需要动这一行，两个部件都会跟着走。 */
+  --wt: var(--qc, var(--ink3));
+}
+
+/* 100% = 完成：只把这一个 token 换成完成绿，填充与圆点自动跟着转。
+   ⚠️ 绿色只上到**图形**上。右侧读数保持灰字，100% 时换成对勾 ——
+      绿的对比度 3.37:1 够图形（门槛 3:1）但跌破正文门槛（4.5:1），
+      把「100%」这四个字符染绿就是本页唯一一处不合规的文字。 */
+.prog.full {
+  --wt: var(--ok);
+}
+
+/* 轨道作为 flex item 占满「读数之外」的剩余宽度。
+   min-width:0 不能省：flex 子项的默认 min-width 是 auto，会被内容顶宽。 */
+.prog .wtrack {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 读数：固定 68rpx 宽（设计稿 34px）。
+   宽度固定是「9% → 100% 位数变化不会把轨道左右推挤」的唯一保证 ——
+   WXSS 里 font-variant-numeric 不保证生效，靠固定宽度 + 右对齐顶上。
+   换成对勾之后它仍占同样宽度，所以完成那一刻轨道不会突然变长。 */
+.rpv {
+  flex: 0 0 68rpx;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  font-size: 22rpx;
+  font-weight: 600;
+  color: var(--ink3);
+}
+
 /* 已完成：只有两件事 —— 标题划掉、整块变淡。
    不再改左侧色条（那是多余的「处理」，用户明确要求去掉）。 */
 .row.done .row-in {
@@ -979,98 +692,7 @@
 
 /* ---------------- 底部主按钮（详情态） ---------------- */
 
-.bottombar {
-  flex: 0 0 auto;
-  padding: 18rpx 32rpx 28rpx;
-  padding-bottom: calc(28rpx + env(safe-area-inset-bottom));
-  background: #fff;
-  border-top: 2rpx solid var(--line);
-}
 
-.btn {
-  width: 100%;
-  height: 88rpx;
-  border-radius: 24rpx;
-  font-size: 28rpx;
-  font-weight: 500;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.btn .ico-plus {
-  margin-right: 14rpx;
-}
-
-.btn.primary { background: var(--blue); color: #fff; }
-.btn.dark { background: var(--ink); color: #fff; }
-
-/* ---------------- 底部 Tab ---------------- */
-
-/* 底部 Tab。
-   ⚠️ 高度必须写在 .tb 上，不能写在 .tabbar 上。
-   全局 box-sizing 是 border-box，若给 .tabbar 同时设 height:120rpx 与
-   padding-bottom: env(safe-area-inset-bottom)，安全区会被从这 120rpx 里「抠掉」：
-   iPhone 上 120rpx = 88px、安全区 ≈ 44px，内容区只剩 44px，而
-   图标盒(40rpx) + 间距(8rpx) + 文字(20rpx) 需要 50px 以上，图标只能顶出上边框 ——
-   那条 border-top 就横穿在图标上（实测图标顶部 y=1107，边框在 y=1111）。
-   现在安全区加在 120rpx 之外，内容区永远是完整的 120rpx。 */
-.tabbar {
-  flex: 0 0 auto;
-  display: flex;
-  background: #fff;
-  border-top: 2rpx solid var(--line);
-  padding-bottom: constant(safe-area-inset-bottom);
-  padding-bottom: env(safe-area-inset-bottom);
-}
-
-.tb {
-  flex: 1;
-  height: 120rpx;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  font-size: 20rpx;
-  color: var(--ink3);
-}
-
-/* 图标统一装进 40rpx 见方的盒子。
-   三个图标本身是 38 / 30 / 40rpx 不等高，直接居中会让图标和文字各错几 rpx，
-   看起来就是「图标没对齐」。 */
-.tb .tbi {
-  width: 40rpx;
-  height: 40rpx;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.tb .lbl {
-  margin-top: 8rpx;
-  line-height: 1;
-}
-
-.tb.on {
-  color: var(--ink);
-}
-
-/* ---------------- 悬浮新建 ---------------- */
-
-.fab {
-  position: absolute;
-  right: 36rpx;
-  width: 104rpx;
-  height: 104rpx;
-  border-radius: 34rpx;
-  background: var(--q1);
-  color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  box-shadow: 0 20rpx 44rpx -16rpx rgba(217, 48, 60, 0.75);
-  z-index: 6;
-}
 
 /* ---------------- 遮罩与抽屉 ---------------- */
 
@@ -1448,284 +1070,4 @@
 .func .arw {
   color: var(--ink3);
   font-size: 28rpx;
-}
-
-/* ---------------- 自绘图标（不用 svg 文件，避开 Android 兼容问题） ---------------- */
-
-.ico {
-  display: block;
-}
-
-.ico-grid {
-  width: 38rpx;
-  height: 38rpx;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6rpx;
-}
-
-.ico-grid .c {
-  border: 3rpx solid currentColor;
-  border-radius: 7rpx;
-}
-
-.ico-list {
-  width: 38rpx;
-  height: 30rpx;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-}
-
-.ico-list .c {
-  height: 3rpx;
-  border-radius: 2rpx;
-  background: currentColor;
-}
-
-.ico-list .c.short { width: 64%; }
-
-/* 拖动手柄里的三横线抓手（自绘，与其它图标同一套做法）。
-   ⚠️ 必须写在这里（.ico 之后）：.ico 也是 display:block，同权重下靠先后定胜负，
-   放前面会被它盖掉，flex 布局失效、三根线挤成一坨。 */
-.ico-drag {
-  width: 30rpx;
-  height: 24rpx;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-}
-
-.ico-drag .c {
-  height: 4rpx;
-  border-radius: 2rpx;
-  background: currentColor;
-}
-
-.ico-user {
-  width: 40rpx;
-  height: 40rpx;
-}
-
-.ico-user .h {
-  width: 16rpx;
-  height: 16rpx;
-  border: 3rpx solid currentColor;
-  border-radius: 50%;
-  margin: 0 auto;
-}
-
-.ico-user .b {
-  width: 32rpx;
-  height: 15rpx;
-  border: 3rpx solid currentColor;
-  border-bottom: 0;
-  border-radius: 18rpx 18rpx 0 0;
-  margin: 4rpx auto 0;
-}
-
-.ico-chev-l,
-.ico-chev-r {
-  width: 14rpx;
-  height: 14rpx;
-  border-top: 3rpx solid currentColor;
-  border-right: 3rpx solid currentColor;
-}
-
-.ico-chev-l { transform: rotate(-135deg); }
-.ico-chev-r { transform: rotate(45deg); }
-
-.ico-check {
-  width: 12rpx;
-  height: 22rpx;
-  border-bottom: 4rpx solid currentColor;
-  border-right: 4rpx solid currentColor;
-  transform: rotate(45deg);
-  margin-bottom: 6rpx;
-}
-
-/* 撤销：左向箭头（三角箭头 + 尾杆），一个元素两个伪元素画完。
-   纵向占位 16 + margin-bottom 12 = 28rpx，与 .ico-check（22 + 6）**相等**——
-   两者是同一个按钮的两种状态，占位不同的话，点「完成」变「撤销」的瞬间
-   图标和文字会整体上下跳一下。 */
-.ico-undo {
-  width: 30rpx;
-  height: 16rpx;
-  position: relative;
-  margin-bottom: 12rpx;
-}
-
-.ico-undo::before {            /* 三角箭头 */
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 0;
-  width: 0;
-  height: 0;
-  border-top: 8rpx solid transparent;
-  border-bottom: 8rpx solid transparent;
-  border-right: 11rpx solid currentColor;
-}
-
-.ico-undo::after {             /* 尾杆（与箭头根部重叠 2rpx，不留接缝） */
-  content: "";
-  position: absolute;
-  left: 9rpx;
-  right: 0;
-  top: 6rpx;
-  height: 4rpx;
-  border-radius: 2rpx;
-  background: currentColor;
-}
-
-.ico-plus {
-  width: 28rpx;
-  height: 28rpx;
-  position: relative;
-  flex: 0 0 28rpx;
-}
-
-.ico-plus::before,
-.ico-plus::after {
-  content: "";
-  position: absolute;
-  background: currentColor;
-  border-radius: 2rpx;
-}
-
-/* 十字用百分比居中，不再写死 top/left 的绝对 rpx。
-   原来 .big/.sm 只覆盖了 width/height，没覆盖基类的 flex:0 0 28rpx，
-   于是这个 flex item 的「宽」永远是 28rpx、「高」却是 44rpx：
-   横杠撑满 28rpx，竖杠按 44rpx 的盒子 left:20rpx 定位 → 竖杠跑到横杠右端，
-   看起来是个「†」而不是「＋」（实测竖杠中心比按钮中心偏 6px）。 */
-.ico-plus::before {
-  left: 0;
-  right: 0;
-  top: calc(50% - 2rpx);
-  height: 4rpx;
-}
-
-.ico-plus::after {
-  top: 0;
-  bottom: 0;
-  left: calc(50% - 2rpx);
-  width: 4rpx;
-}
-
-/* FAB 里的大号加号（flex-basis 必须跟着尺寸一起改，否则又会被压回 28rpx） */
-.ico-plus.big {
-  width: 44rpx;
-  height: 44rpx;
-  flex: 0 0 44rpx;
-}
-
-/* 主按钮里的小号加号 */
-.ico-plus.sm {
-  width: 30rpx;
-  height: 30rpx;
-  flex: 0 0 30rpx;
-}
-
-/* 垃圾桶：一个元素 + 两个伪元素画完，不再用内层 <view class="body">。
-   ⚠️ 踩过的坑：内层那个 class="body" 会同时命中页面级的 .body（滚动内容的内边距
-   容器：.body{padding:24rpx 32rpx 0}）。绝对定位时左右 padding 相加 64rpx，
-   远大于原定的 22rpx 宽，桶身被撑到约 68rpx 并整体右移 —— 实测桶身中心比按钮中心
-   偏右约 21rpx，而桶盖（类名 .lid，没有同名冲突）却是正的，看上去就是
-   「删除图标不居中」。
-   规矩：图标内部不要用会和页面 class 重名的名字；定位一律
-   「显式 width + left:calc(50% - w/2)」，不写 left/right 对。 */
-.ico-trash {
-  width: 32rpx;
-  height: 34rpx;
-  position: relative;
-}
-
-.ico-trash::before {          /* 桶盖 */
-  content: "";
-  position: absolute;
-  top: 0;
-  left: calc(50% - 16rpx);
-  width: 32rpx;
-  height: 3rpx;
-  border-radius: 2rpx;
-  background: currentColor;
-}
-
-.ico-trash::after {           /* 桶身 */
-  content: "";
-  position: absolute;
-  top: 8rpx;
-  bottom: 0;
-  left: calc(50% - 12rpx);
-  width: 24rpx;
-  box-sizing: border-box;
-  border: 3rpx solid currentColor;
-  border-top: 0;
-  border-radius: 0 0 6rpx 6rpx;
-}
-
-.ico-dots {
-  width: 30rpx;
-  height: 8rpx;
-  display: flex;
-  justify-content: space-between;
-}
-
-.ico-dots .d {
-  width: 7rpx;
-  height: 7rpx;
-  border-radius: 50%;
-  background: currentColor;
-}
-
-.ico-sliders {
-  width: 32rpx;
-  height: 26rpx;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-}
-
-.ico-sliders .sl {
-  height: 3rpx;
-  border-radius: 2rpx;
-  background: currentColor;
-  position: relative;
-}
-
-.ico-sliders .kn {
-  position: absolute;
-  top: -4rpx;
-  width: 11rpx;
-  height: 11rpx;
-  border-radius: 50%;
-  background: currentColor;
-}
-
-/* 排序入口图标：上下两个尖角 = ⇅ */
-.ico-sort {
-  width: 22rpx;
-  height: 30rpx;
-  position: relative;
-  flex: 0 0 22rpx;
-}
-
-.ico-sort .c {
-  position: absolute;
-  left: calc(50% - 7rpx);
-  width: 14rpx;
-  height: 14rpx;
-  box-sizing: border-box;
-  border-top: 3rpx solid currentColor;
-  border-right: 3rpx solid currentColor;
-}
-
-.ico-sort .c.up {
-  top: 2rpx;
-  transform: rotate(-45deg);
-}
-
-.ico-sort .c.dn {
-  bottom: 2rpx;
-  transform: rotate(135deg);
 }

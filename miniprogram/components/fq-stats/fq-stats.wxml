@@ -1,0 +1,10 @@
+<!-- components/fq-stats/fq-stats.wxml
+     统计条（总览 / 我的共用）
+     从 pages/index/index.wxml 整段搬来。结构一字未改 —— 只有挂在根上的
+     wx:if 挪到了组件标签上（「该不该出现」是页面的事，不是组件的事）。 -->
+  <view class="stats {{flat?'flat':''}}">
+    <view class="stat" wx:for="{{stats}}" wx:key="k">
+      <view class="v num">{{item.v}}</view>
+      <view class="k">{{item.k}}</view>
+    </view>
+  </view>

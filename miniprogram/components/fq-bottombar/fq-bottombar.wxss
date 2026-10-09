@@ -1,0 +1,14 @@
+/* components/fq-bottombar/fq-bottombar.wxss
+   详情页底部主按钮
+   规则原在 pages/index/index.wxss 里，整段搬来、一字未改。
+   共享资产（自绘图标 .ico-* / 象限图标 .qmark / 按钮 .btn*）留在 app.wxss，
+   靠 styleIsolation: apply-shared 生效 —— 所以这里只有本组件自己的骨架。
+   ============================================================== */
+
+.bottombar {
+  flex: 0 0 auto;
+  padding: 18rpx 32rpx 28rpx;
+  padding-bottom: calc(28rpx + env(safe-area-inset-bottom));
+  background: #fff;
+  border-top: 2rpx solid var(--line);
+}

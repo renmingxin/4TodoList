@@ -24,9 +24,12 @@
  *
  * 用法（项目根目录）：
  *   node .workbuddy/tools/class-collision.js \
- *     miniprogram/pages/index/index.wxml \
- *     miniprogram/pages/index/index.wxss \
+ *     miniprogram/pages/index \
+ *     miniprogram/components \
  *     miniprogram/app.wxss
+ *
+ *   参数可以传目录（递归取其中的 .wxml / .wxss），也可以传单个文件。
+ *   组件化之后图标散落在多个组件里，传目录才不容易漏。
  *
  * 退出码非 0 表示发现冲突。
  */
@@ -95,11 +98,36 @@ function iconSubtreeClasses(src, file, into) {
   }
 }
 
-const files = process.argv.slice(2);
-if (files.length < 2) {
-  console.error('用法：node class-collision.js <页面.wxml> <页面.wxss> [app.wxss ...]');
+// 参数可以是文件，也可以是目录（递归取 .wxml / .wxss）。
+// 组件化之后图标散落在多个组件里，逐个列路径既啰嗦又容易漏，所以支持目录。
+const path = require('path');
+const args = process.argv.slice(2);
+if (args.length < 2) {
+  console.error('用法：node class-collision.js <file|dir ...>（.wxml / .wxss）');
   process.exit(2);
 }
+const files = [];
+args.forEach(function (a) {
+  if (!fs.existsSync(a)) {
+    console.error('路径不存在：' + a);
+    process.exit(2);
+  }
+  if (fs.statSync(a).isDirectory()) {
+    (function walk(d) {
+      fs.readdirSync(d).sort().forEach(function (f) {
+        const q = path.join(d, f);
+        if (fs.statSync(q).isDirectory()) {
+          if (f === 'node_modules' || f === '.git') return;
+          walk(q);
+        } else if (/\.(wxml|wxss)$/.test(f)) {
+          files.push(q);
+        }
+      });
+    })(a);
+  } else {
+    files.push(a);
+  }
+});
 
 const wxmls = files.filter(function (f) { return /\.wxml$/.test(f); });
 const wxsss = files.filter(function (f) { return /\.wxss$/.test(f); });

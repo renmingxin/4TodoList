@@ -1,0 +1,178 @@
+/* components/fq-cal/fq-cal.wxss
+   月历（月份条 + 7×6 = 42 格）
+   ============================================================
+   换算：设计稿 new-features.html 的 px × 2 = rpx（750rpx = 屏宽）。
+   色值：「今天 / 选中」一律用 --ink，与全站的选中语义一致；
+        非本月日期与两种圆点用下面三个局部 token —— **刻意不复用 --ink3**，
+        它是「提示文字」那一档灰，跟 8rpx 圆点、21rpx 日期的对比度需求不是一回事。
+
+   ⚠️ 本项目不靠 flex 的 gap 造间距（旧 Android WebView 对 flex gap 不可靠），
+      一律用 margin；gap 只留给 display:grid。
+   ⚠️ 7 等分必须同时清掉 grid item 的 min-width:auto，否则某一格的内容
+      能把整列顶宽，等分立刻失效（与 .q / .qrow .qname 是同一条坑）。
+   ============================================================ */
+
+.calwrap {
+  --cal-dot: #b4bac3;   /* 有带提醒的事项 */
+  --cal-dot-p: #cbd1d8; /* 写过计划（固定比上一条淡） */
+  --cal-out: #c6cbd3;   /* 非本月的日期数字 */
+}
+
+/* ---------------- 月份条 ---------------- */
+
+.monthbar {
+  display: flex;
+  align-items: center;
+  padding: 4rpx 0 20rpx;
+}
+
+.monthbar .mv {
+  flex: 1;
+  font-size: 32rpx;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+}
+
+.mbtn {
+  flex: 0 0 auto;
+  height: 60rpx;
+  min-width: 60rpx;
+  /* 间距走 margin 而不是父元素的 gap —— 见头注释 */
+  margin-left: 14rpx;
+  padding: 0 18rpx;
+  border: 2rpx solid var(--line);
+  border-radius: 18rpx;
+  background: #fff;
+  color: var(--ink2);
+  font-size: 24rpx;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 「今天」按钮在已选中今天时反色 —— 「你已经在这儿了」的即时反馈 */
+.mbtn.on {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: #fff;
+}
+
+/* 月份箭头要比抽屉里那个小箭头大一号：那边是列表行的装饰，
+   这里是 60rpx 的独立按钮，14rpx 的箭头在按钮里既看不清也按不准。
+   用复合选择器（.ico-chev-l.chev-lg）而不是后代选择器 —— 与 .qmark.q1 同一套做法：
+   官方对「组件与页面里使用后代选择器」有明确警告，复合选择器没有这层不确定。 */
+.ico-chev-l.chev-lg,
+.ico-chev-r.chev-lg {
+  width: 24rpx;
+  height: 24rpx;
+  border-top-width: 4rpx;
+  border-right-width: 4rpx;
+}
+
+/* ---------------- 网格 ---------------- */
+
+.cal {
+  background: #fff;
+  border: 2rpx solid var(--line);
+  border-radius: 28rpx;
+  padding: 18rpx 12rpx 22rpx;
+}
+
+.cal .wk {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  margin-bottom: 2rpx;
+}
+
+.cal .wk text {
+  /* display:block 是必须的：text 默认是行内元素，
+     行内元素上的 height / line-height 垂直居中不成立。 */
+  display: block;
+  height: 38rpx;
+  line-height: 38rpx;
+  text-align: center;
+  font-size: 21rpx;
+  font-weight: 600;
+  color: var(--ink3);
+}
+
+.cal .days {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+}
+
+/* 格子里是「数字圆 + 下方圆点」两行，所以是纵向 flex 居中 ——
+   这里不能套用「height + 等值 line-height」那招（它只管单行）。 */
+.dy {
+  min-width: 0;              /* 7 等分的前提，见头注释 */
+  height: 76rpx;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.dy .num {
+  width: 56rpx;
+  height: 56rpx;
+  border: 3rpx solid transparent;   /* 常驻占位：有描边/没描边不会让数字跳动 */
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 25rpx;
+  font-weight: 500;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.dy .dt {
+  display: flex;
+  height: 8rpx;
+  margin-top: 6rpx;
+}
+
+.dy .dt .i {
+  width: 8rpx;
+  height: 8rpx;
+  border-radius: 50%;
+  background: var(--cal-dot);
+}
+
+.dy .dt .i.q {
+  background: var(--cal-dot-p);
+}
+
+/* 两个点之间的间距同样走 margin；没有点时 .dt 仍占 8rpx 高（见 WXML 注释） */
+.dy .dt .i + .i {
+  margin-left: 5rpx;
+}
+
+.dy.other .num {
+  color: var(--cal-out);
+}
+
+.dy.today .num {
+  border-color: var(--ink);
+  font-weight: 600;
+}
+
+/* 选中 = 实心填充。它和 .today 的描边叠在同一个元素上时，
+   由于描边色与填充色相同，视觉上仍是一个完整的实心圆 ——
+   「选中且是今天」不需要再补一条样式。 */
+.dy.sel .num {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: #fff;
+  font-weight: 600;
+}
+
+.dy.sel .dt .i {
+  background: var(--ink);
+}
+
+.dy.sel .dt .i.q {
+  background: var(--cal-dot);
+}

@@ -10,15 +10,24 @@
 //   fq_family      { name, ownerOpenid, inviteCode, inviteExpire, rev, createdAt }
 //   fq_members     { _openid, fid, role, name, active, joinedAt }
 //   fq_categories  { fid, _openid, name, order, createdAt }
-//   fq_items       { fid, _openid, title, note, quad, catId, priority, done, remindAt,
-//                    order, createdAt, updatedAt, doneAt, doneBy,
+//   fq_items       { fid, _openid, title, note, quad, catId, priority, progress, done,
+//                    remindAt, order, createdAt, updatedAt, doneAt, doneBy,
 //                    pushed, pushedAt, pushOk, pushErr }
+//
+//   · progress 是 0~100 的整数（v7 新增）。它和 done **不是两个字段，而是同一条
+//     状态线的两种读法**：落库后永远满足 done ⟺ progress === 100。耦合钉在
+//     updateItem 里（见那段注释）—— 客户端送哪一个都会把另一个推到位。
+//   fq_plans       { fid, _openid, date, text, updatedAt }
 //   fq_subs        { _openid, quota, lastGrantAt, updatedAt }
 //
 //   · _openid 现在的含义是「谁创建的」，**不再参与归属过滤** —— 归属只看 fid。
-//     但有两处例外，都是「按人」而不是「按家」的东西，且都读得理直气壮：
+//     但有三处例外，都是「按人」而不是「按家」的东西，且都读得理直气壮：
 //     ① fq_subs 的提醒额度（订阅次数是发到人身上的，不是家庭资产）；
-//     ② fq_items 里 pushed 系列字段的**收件人** —— 提醒只发给「创建这条事项的人」。
+//     ② fq_items 里 pushed 系列字段的**收件人** —— 提醒只发给「创建这条事项的人」；
+//     ③ fq_plans 的**归属过滤**。日程计划是「我今天要做什么」，是个人笔记而不是
+//        家庭资产：一个家庭里两个人都写今天要干什么，共用一个格子必然互相覆盖，
+//        所以按 (fid, date, _openid) 一条一条存，读的时候只取自己的。
+//        fid 仍然要存 —— 它把「这个家庭的日程」圈在一起，也让 clearAll 有据可依。
 //
 //   · pushed 系列是 fqRemind（定时触发器云函数）写的，本函数只负责在
 //     「提醒时间被改动」时把它们复位。客户端**改不了**这几个字段
@@ -49,11 +58,15 @@ const COL_FAMILY = 'fq_family';
 const COL_MEMBERS = 'fq_members';
 const COL_CATS = 'fq_categories';
 const COL_ITEMS = 'fq_items';
+const COL_PLANS = 'fq_plans';
 const COL_SUBS = 'fq_subs';
 
 const QUADS = ['q1', 'q2', 'q3', 'q4'];
 const MAX_TITLE = 60;
 const MAX_NOTE = 200;
+// 一天的日程计划。给得比 note 宽 —— 它是一段连贯的「今天要干什么」，
+// 不是一条备注。客户端 textarea 的 maxlength 读 utils/const.js 的 PLAN_MAX，两处成对。
+const MAX_PLAN = 300;
 const MAX_CAT_NAME = 12;
 const MAX_FAMILY_NAME = 16;
 const MAX_MEMBER_NAME = 12;
@@ -90,8 +103,17 @@ const INVITE_TTL = 24 * 60 * 60 * 1000;
    v3 → v4：分类支持删除与改名，新增 removeCategory / renameCategory。
    v4 → v5：提醒推送，新增 grantSub（攒订阅额度）；fq_items 多出 pushed 系列字段，
             由独立的 fqRemind 定时云函数消费。
-   客户端首屏 bootstrap 会拿这个值做握手，对不上直接弹窗告诉你重新部署。 */
-const FN_VER = 5;
+   v5 → v6：日程版块，新增 savePlan（按日期存「这一天要做什么」）与 fq_plans 集合；
+            bootstrap / sync 多回一个 plans 字段。
+   v6 → v7：事项进度条。fq_items 多出 progress 字段，且 updateItem 里多了
+            「progress 与 done 互为充要条件」这条耦合。
+   客户端首屏 bootstrap 会拿这个值做握手，对不上直接弹窗告诉你重新部署。
+
+   ⚠️ v7 这次**没有**新增 action，为什么照样 +1：旧云函数不认识 progress，
+   客户端送上去会被它静默丢掉（白名单写法，没列进去的字段一律无视）——
+   表现是「拖完进度条看着生效了，一刷新全回到 0%」。这正是握手要拦的那类
+   「代码明明对却悄无声息」的故障，所以版本号必须动。 */
+const FN_VER = 7;
 
 const ACTIONS = [
   'bootstrap',
@@ -106,6 +128,7 @@ const ACTIONS = [
   'addCategory',
   'removeCategory',
   'renameCategory',
+  'savePlan',
   'genInvite',
   'joinFamily',
   'leaveFamily',
@@ -129,6 +152,15 @@ function toPriority(v) {
   return n >= 1 && n <= 4 ? n : 3;
 }
 
+// 进度：0~100 的整数。空值 / 非法值落 0，越界一律夹紧到端点。
+// 拖动时客户端每个 touchmove 都送一个小数，所以这里必须 round —— 落库
+// 只存整数，读数才不会出现 72.371% 这种既难看又比对不上的值。
+function toProgress(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(100, Math.round(n)));
+}
+
 // remindAt 存毫秒时间戳；空值/非法值一律落 null。
 // 到点前 10 分钟由 fqRemind 依据它推送（见那个云函数）。
 function toRemind(v) {
@@ -143,6 +175,14 @@ function toOrder(v) {
   const n = Number(v);
   if (!Number.isFinite(n)) return Date.now();
   return Math.round(Math.max(-1e12, Math.min(1e12, n)));
+}
+
+// 日程计划的日期键，只接受 'YYYY-MM-DD'。
+// 严格到字符级：它是 fq_plans 的**唯一键**（配合 fid + _openid 做 upsert），
+// 放过 '2026-10-9' 这种写法，同一天就会存出两条记录，读的时候还要再兼容一次。
+function toDate(v) {
+  const s = toStr(v, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : '';
 }
 
 // 邀请码：统一大写、去掉空格与常见误输入的连字符
@@ -363,6 +403,7 @@ async function seed(openid, fid) {
         quad: it.quad,
         catId: catIds[0], // 种子事项全部落在「工作」
         priority: it.priority,
+        progress: 0,
         done: false,
         remindAt: it.remind ? tmr.getTime() : null,
         order: 1000 + i, // 种子数据排在新增事项之前
@@ -386,6 +427,19 @@ async function ensureDefaultCategory(fid, openid) {
 
 /* ---------------- 各 action ---------------- */
 
+// 读「我」的日程计划：按 fid 圈定家庭，再按 _openid 只取自己的那几条。
+// 返回的是 [{ date, text }]，不带 fid / _openid —— 客户端只关心这两列，
+// 少回一点字段，bootstrap 的载荷就小一点。
+//
+// ⚠️ 一个家庭里待久了，_openid 会有多条（家人各写各的）。这里必须带 _openid 过滤，
+//    否则你会在自己的日程里看到对方的计划，两边还会用同一个日期键去 upsert 打架。
+async function plansFor(ctx, openid) {
+  const rows = await fetchAll(COL_PLANS, { fid: ctx.fid, _openid: openid }, 'date');
+  return rows.map(function (p) {
+    return { date: p.date, text: p.text };
+  });
+}
+
 async function bootstrap(openid) {
   const ctx = await ensureFamily(openid);
 
@@ -399,6 +453,7 @@ async function bootstrap(openid) {
     items,
     family: await familyInfo(ctx, openid),
     sub: await subInfo(openid),
+    plans: await plansFor(ctx, openid),
     fnVer: FN_VER,
     actions: ACTIONS,
   };
@@ -430,6 +485,9 @@ async function sync(openid, event) {
     // 额度可能被 fqRemind 消耗掉（提醒发出去了），「未送达」数也会跟着变，
     // 所以每次拉数据都顺带回一次。只在 changed 分支里查，绝大多数轮询不付这个成本。
     sub: await subInfo(openid),
+    // 日程计划同理：只在真变了才拉。它很小（一天一条、最多 300 字），
+    // 但没必要每 8 秒跟着 items 一起回。
+    plans: await plansFor(ctx, openid),
   };
 }
 
@@ -452,6 +510,9 @@ async function addItem(openid, event) {
       quad: toQuad(src.quad),
       catId,
       priority: toPriority(src.priority),
+      // 新事项从 0% 起步。显式落 0（而不是留空），这样「有没有这个字段」
+      // 就不再是两种含义：老数据的缺省由客户端按 done 推出来（见 rowVM）。
+      progress: 0,
       done: false,
       remindAt: toRemind(src.remindAt),
       // pushed 系列由 fqRemind 消费。新建时显式落 false（而不是留空），
@@ -508,11 +569,26 @@ async function updateItem(openid, event) {
     patch.catId = catId;
   }
 
-  if (src.done !== undefined) {
-    patch.done = !!src.done;
-    patch.doneAt = src.done ? db.serverDate() : null;
+  // 进度与完成：**一条状态线的两种读法**，不是两个可以各说各话的字段。
+  // 设计稿里那串规则（拖到 100% 即完成 / 从 100% 拖回 99% 自动撤销完成 /
+  // 点完成按钮进度直接跳满 / 点撤销则归零）全部收敛成一句：
+  //     落库后必须满足 done ⟺ progress === 100。
+  // 为什么钉在服务端而不是页面：① 客户端能绕过，后端不能信任；
+  // ② 老版本客户端只送 done（左滑的完成 / 撤销就是这条路径），如果不在这里
+  //    补 progress，库里就会出现「已完成但进度停在 60%」这种自相矛盾的行 ——
+  //    而它一旦出现，用户看到第一次就不再相信这个控件了。
+  const hasProgress = src.progress !== undefined;
+  const hasDone = src.done !== undefined;
+  if (hasProgress || hasDone) {
+    const prog = hasProgress ? toProgress(src.progress) : 0;
+    // 两个都送了就以 done 为准 —— 它本来就是「到没到 100%」的另一种说法，
+    // 这样即便客户端送来自相矛盾的一对，落库的也一定是自洽的那一种。
+    const done = hasDone ? !!src.done : prog >= 100;
+    patch.progress = done ? 100 : prog;
+    patch.done = done;
+    patch.doneAt = done ? db.serverDate() : null;
     // 共享清单里「谁完成的」是刚需，而且几乎不要成本，顺手记下来
-    patch.doneBy = src.done ? openid : '';
+    patch.doneBy = done ? openid : '';
   }
 
   if (!Object.keys(patch).length) return { updated: 0 };
@@ -548,10 +624,20 @@ async function bulk(openid, event) {
   const where = { fid: ctx.fid, quad, catId };
 
   if (op === 'markAllDone') {
+    // progress 必须一起写：这是批量版的「标记为已完成」，绕过 updateItem，
+    // 漏掉它就会留下满屏「已完成但进度停在 0%」的行（不变量在批量路径上破口）。
     const res = await db
       .collection(COL_ITEMS)
       .where({ ...where, done: false })
-      .update({ data: { done: true, doneAt: db.serverDate(), updatedAt: db.serverDate(), doneBy: openid } });
+      .update({
+        data: {
+          done: true,
+          progress: 100,
+          doneAt: db.serverDate(),
+          updatedAt: db.serverDate(),
+          doneBy: openid,
+        },
+      });
     if (res.stats.updated) await bumpRev(ctx.fid);
     return { updated: res.stats.updated };
   }
@@ -591,8 +677,58 @@ async function clearAll(openid, ctx) {
     throw new Error('只有家庭创建者可以清空整个家庭的数据');
   }
   const res = await db.collection(COL_ITEMS).where({ fid: ctx.fid }).remove();
-  if (res.stats.removed) await bumpRev(ctx.fid);
-  return { removed: res.stats.removed };
+  // 日程计划也一并清掉，但**只清调用者自己的**：fq_items 是家庭资产、人人可清，
+  // fq_plans 是个人笔记 —— 创建者有权清空全家的事项，没权删家人写下的日记。
+  const mine = await db
+    .collection(COL_PLANS)
+    .where({ fid: ctx.fid, _openid: openid })
+    .remove();
+  const removed = res.stats.removed || 0;
+  if (removed || (mine.stats && mine.stats.removed)) await bumpRev(ctx.fid);
+  return { removed: removed, plans: (mine.stats && mine.stats.removed) || 0 };
+}
+
+// 日程：写下「这一天要做什么」。语义是 upsert —— 同一天同一个人只留一条。
+//
+// 空文本 = 删掉这一天的计划，而不是另开一个 removePlan action：
+// 「把内容清空再保存」本来就是用户能理解的动作，少一个 action 就少一处协议。
+async function savePlan(openid, event) {
+  const ctx = await ensureFamily(openid);
+  const date = toDate(event.date);
+  if (!date) throw new Error('日期格式不对（应为 YYYY-MM-DD）');
+  const text = toStr(event.text, MAX_PLAN);
+
+  const where = { fid: ctx.fid, _openid: openid, date: date };
+  const found = await db.collection(COL_PLANS).where(where).limit(1).get();
+  const cur = found.data[0];
+
+  if (!text) {
+    if (!cur) return { date: date, text: '' };
+    await db.collection(COL_PLANS).where(where).remove();
+    await bumpRev(ctx.fid);
+    return { date: date, text: '' };
+  }
+
+  if (cur) {
+    // 内容没变就不写。省一次写库，也省一次 rev —— 否则每次点保存都让家人的
+    // 客户端白拉一遍全量数据（rev 一动，所有轮询都会走 changed 分支）。
+    if (cur.text === text) return { date: date, text: text };
+    await db.collection(COL_PLANS).doc(cur._id).update({
+      data: { text: text, updatedAt: db.serverDate() },
+    });
+  } else {
+    await db.collection(COL_PLANS).add({
+      data: {
+        fid: ctx.fid,
+        _openid: openid,
+        date: date,
+        text: text,
+        updatedAt: db.serverDate(),
+      },
+    });
+  }
+  await bumpRev(ctx.fid);
+  return { date: date, text: text };
 }
 
 // 排序：客户端拖动之后把受影响的事项一次性回写。
@@ -974,6 +1110,9 @@ exports.main = async (event) => {
         break;
       case 'renameCategory':
         data = await renameCategory(OPENID, event);
+        break;
+      case 'savePlan':
+        data = await savePlan(OPENID, event);
         break;
       case 'genInvite':
         data = await genInvite(OPENID);

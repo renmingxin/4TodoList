@@ -1,0 +1,32 @@
+/* components/fq-fab/fq-fab.wxss
+   悬浮新建（总览页 · 「不重要也不紧急」那一格的右下角）
+   规则原在 pages/index/index.wxss 里，整段搬来；2026-10-09 只改了落点：
+   从「屏幕右下角、悬浮在饮水条之上」改成「矩阵右下角、落在那一格里面」。
+   共享资产（自绘图标 .ico-* / 象限图标 .qmark / 按钮 .btn*）留在 app.wxss，
+   靠 styleIsolation: apply-shared 生效 —— 所以这里只有本组件自己的骨架。
+   ============================================================== */
+
+/* ---------------- 悬浮新建 ---------------- */
+
+.fab {
+  position: absolute;
+  /* 落点 = 「不重要也不紧急」那一格的右下角。
+     参照系是 .ovgrid（宿主给了它 position:relative）而不是 .screen ——
+     这一点就是这次修改的全部：屏幕坐标 vs 矩阵坐标。
+     矩阵高度是 flex 分配的，屏幕变矮它就变矮，按钮跟着走，不需要 JS 参与。
+     24 / 22 与 .q 的 padding（26rpx 24rpx 22rpx）对齐，看起来是卡片里的一员，
+     而不是一颗随便飘着的球。 */
+  right: 24rpx;
+  bottom: 22rpx;
+  width: 104rpx;
+  height: 104rpx;
+  border-radius: 34rpx;
+  background: var(--q1);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 20rpx 44rpx -16rpx rgba(217, 48, 60, 0.75);
+  z-index: 6;
+}
+

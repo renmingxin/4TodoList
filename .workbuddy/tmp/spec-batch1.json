@@ -1,0 +1,124 @@
+{
+  "components": [
+    {
+      "name": "fq-appbar",
+      "title": "顶部应用栏（总览 / 全部 / 我的）",
+      "jsNote": "原来这三块（标题 / 副标题 / 右上角按钮）写在页面里，但页面自己\n只提供数据，不该管它长什么样。",
+      "js": "    // 右上角齿轮：切到「我的」。\n    onMine() {\n      this.triggerEvent('mine');\n    },",
+      "wxml": [
+        {
+          "from": 83,
+          "to": 95,
+          "expectFirst": "<view class=\"appbar\"",
+          "expectLast": "</view>",
+          "bodyEdits": [[" wx:if=\"{{view!=='detail'}}\"", ""]],
+          "replaceWith": "    <!-- 顶栏本体在 components/fq-appbar -->\n    <fq-appbar wx:if=\"{{view!=='detail'}}\" page-title=\"{{pageTitle}}\" page-meta=\"{{pageMeta}}\" capsule-reserve=\"{{capsuleReserve}}\" bind:mine=\"onMine\" />"
+        }
+      ],
+      "wxss": [{ "from": 69, "to": 115 }]
+    },
+
+    {
+      "name": "fq-stats",
+      "title": "统计条（总览 / 我的共用）",
+      "jsNote": "同一个组件被两个视图用：总览看四项待办数，我的看家庭概览。\n区别只有 flat 一个变体（去掉外层留白），所以做成属性而不是两个组件。",
+      "wxml": [
+        {
+          "from": 290,
+          "to": 295,
+          "replaceOnly": true,
+          "expectFirst": "<view class=\"stats flat\">",
+          "expectLast": "</view>",
+          "replaceWith": "          <fq-stats flat stats=\"{{mineStats}}\" />"
+        },
+        {
+          "from": 125,
+          "to": 130,
+          "expectFirst": "<view class=\"stats\"",
+          "expectLast": "</view>",
+          "bodyEdits": [
+            [" wx:if=\"{{view==='overview'}}\"", ""],
+            ["class=\"stats\"", "class=\"stats {{flat?'flat':''}}\""]
+          ],
+          "replaceWith": "    <fq-stats wx:if=\"{{view==='overview'}}\" stats=\"{{stats}}\" />"
+        }
+      ],
+      "wxss": [{ "from": 276, "to": 328 }]
+    },
+
+    {
+      "name": "fq-fab",
+      "title": "悬浮新建（仅总览）",
+      "js": "    // 右下角那颗「+」。\n    onCreate() {\n      this.triggerEvent('create');\n    },",
+      "wxml": [
+        {
+          "from": 379,
+          "to": 382,
+          "expectFirst": "悬浮新建（仅总览）",
+          "expectLast": "</view>",
+          "bodyEdits": [
+            [" wx:if=\"{{view==='overview'}}\"", ""],
+            ["style=\"bottom:{{fabBottom}}px\"", "style=\"bottom:{{bottom}}px\""]
+          ],
+          "replaceWith": "    <!-- ============ 悬浮新建（仅总览） → components/fq-fab ============ -->\n    <fq-fab wx:if=\"{{view==='overview'}}\" bottom=\"{{fabBottom}}\" bind:create=\"onNew\" />"
+        }
+      ],
+      "wxss": [{ "from": 1025, "to": 1041 }]
+    },
+
+    {
+      "name": "fq-sortdone",
+      "title": "排序模式的固定底栏",
+      "jsNote": "排序期间替代底栏 / Tab：一是「只能做拖动操作」，\n二是「完成」永远在屏幕上（拖动时列表滚不动，入口按钮可能已经被滚走）。",
+      "js": "    // 「完成」：退出排序模式。\n    onToggle() {\n      this.triggerEvent('toggle');\n    },",
+      "wxml": [
+        {
+          "from": 384,
+          "to": 390,
+          "expectFirst": "排序模式固定底栏",
+          "expectLast": "</view>",
+          "bodyEdits": [[" wx:if=\"{{sortMode}}\"", ""]],
+          "replaceWith": "    <!-- ============ 排序模式固定底栏 → components/fq-sortdone ============ -->\n    <fq-sortdone wx:if=\"{{sortMode}}\" view=\"{{view}}\" bind:toggle=\"onSortToggle\" />"
+        }
+      ],
+      "wxss": [{ "from": 668, "to": 701 }]
+    },
+
+    {
+      "name": "fq-bottombar",
+      "title": "详情页底部主按钮",
+      "hoistBanner": "/* ---------------- 共享按钮（底部主按钮 / 抽屉保存键共用） ----------------\n   原来长在「底部主按钮」那一节里，但它其实被两处用：底栏的 .btn.dark\n   与抽屉保存键的 .btn.primary。跟着搬进 fq-bottombar 就成了\n   「抽屉的按钮样式寄存在底栏组件里」，所以上提到全局：\n   基础形态（高 88rpx / 圆角 24rpx / 居中）+ 两个配色变体。 */",
+      "js": "    // 「在此象限新建」：带默认象限进新建抽屉。\n    onNewHere() {\n      this.triggerEvent('new-here');\n    },",
+      "wxml": [
+        {
+          "from": 392,
+          "to": 398,
+          "expectFirst": "详情页底部主按钮",
+          "expectLast": "</view>",
+          "bodyEdits": [[" wx:if=\"{{view==='detail' && !sortMode}}\"", ""]],
+          "replaceWith": "    <!-- ============ 详情页底部主按钮 → components/fq-bottombar ============ -->\n    <fq-bottombar wx:if=\"{{view==='detail' && !sortMode}}\" bind:new-here=\"onNewHere\" />"
+        }
+      ],
+      "wxss": [{ "from": 949, "to": 955 }],
+      "hoist": [{ "from": 957, "to": 973 }]
+    },
+
+    {
+      "name": "fq-tabbar",
+      "title": "底部 Tab（总览 / 全部 / 我的）",
+      "jsNote": "三个 tab 共用 onPick：组件内部知道「点的是哪一个」，\n页面只需要知道「要切到哪个视图」。",
+      "js": "    // 把被点那一个的 dataset 原样交给页面。\n    // 交给页面的形状与原生事件一致（currentTarget.dataset），\n    // 所以页面上的 onTab 只换取值来源、不必为「事件来自组件」写第二套分支。\n    onPick(e) {\n      this.triggerEvent('pick', e.currentTarget.dataset);\n    },",
+      "wxml": [
+        {
+          "from": 400,
+          "to": 424,
+          "expectFirst": "底部 Tab",
+          "expectLast": "</view>",
+          "bodyEdits": [[" wx:if=\"{{view!=='detail' && !sortMode}}\"", ""]],
+          "replaceWith": "    <!-- ============ 底部 Tab → components/fq-tabbar ============ -->\n    <fq-tabbar wx:if=\"{{view!=='detail' && !sortMode}}\" view=\"{{view}}\" bind:pick=\"onTab\" />"
+        }
+      ],
+      "wxss": [{ "from": 975, "to": 1024 }]
+    }
+  ]
+}

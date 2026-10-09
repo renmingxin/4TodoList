@@ -1,0 +1,199 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>总览页最终效果</title>
+<style>
+  /* 换算：1rpx = 1px。画布 = iPhone 14 Pro（393×852pt）→ 1626rpx 高。 */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 750px; height: 1626px; overflow: hidden; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f4f5f7; }
+  .screen { position: absolute; top: 0; left: 0; width: 750px; height: 1626px;
+            display: flex; flex-direction: column; background: #f4f5f7; overflow: hidden; }
+  .statusbar { flex: 0 0 auto; height: 59px; }
+  .appbar { flex: 0 0 auto; height: 88px; display: flex; align-items: center; justify-content: space-between; padding: 0 32px; }
+  .appbar .t { font-size: 36px; font-weight: 700; color: #111; }
+  .appbar .m { font-size: 22px; color: #8a9099; margin-top: 2px; }
+  .catsrow { flex: 0 0 auto; height: 88px; display: flex; align-items: center; padding: 28px 32px 0; }
+  .cat { height: 60px; padding: 0 24px; border-radius: 30px; background: #fff; border: 2px solid #e6e9ee;
+         display: flex; align-items: center; font-size: 24px; color: #333; margin-right: 14px; }
+  .cat.on { background: #2563eb; border-color: #2563eb; color: #fff; }
+  .stats { flex: 0 0 auto; height: 112px; display: flex; align-items: center; padding: 24px 32px 0; }
+  .stat { flex: 1; height: 88px; background: #fff; border: 2px solid #e6e9ee; border-radius: 20px;
+          display: flex; flex-direction: column; align-items: center; justify-content: center; margin-right: 14px; }
+  .stat:last-child { margin-right: 0; }
+  .stat .n { font-size: 36px; font-weight: 700; color: #111; }
+  .stat .l { font-size: 20px; color: #8a9099; margin-top: 2px; }
+
+  .ovbody { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; padding: 24px 32px; overflow: hidden; }
+  /* position:relative 是 2026-10-09 加的：.fab 要挂在这一层里当「矩阵右下角」的锚。
+     少了它，.fab 会一路找到 .screen（fixed）上去，又变回屏幕坐标。 */
+  .ovgrid { flex: 1 1 auto; min-height: 0; position: relative; }
+
+  .grid { display: flex; flex-wrap: wrap; justify-content: space-between; height: 100%; }
+  .q { flex: 0 0 calc(50% - 7px); min-width: 0; height: calc(50% - 7px); margin-bottom: 14px;
+       padding: 26px 24px 22px; color: #fff; display: flex; flex-direction: column; text-align: left; }
+  .q.nb { margin-bottom: 0; }
+  .q.q1 { background: #d9303c; border-radius: 48px 24px 24px 24px; }
+  .q.q2 { background: #9e6c00; border-radius: 24px 48px 24px 24px; }
+  .q.q3 { background: #c04e18; border-radius: 24px 24px 24px 48px; }
+  .q.q4 { background: #6b7280; border-radius: 24px 24px 48px 24px; }
+  .qtop, .qnum, .qlist { flex-shrink: 0; }
+  .qrow { display: flex; align-items: center; }
+  .qmark { flex: 0 0 56px; width: 56px; height: 56px; border-radius: 50%; background: #fff; margin-right: 16px; }
+  .qname { flex: 1 1 auto; min-width: 0; font-size: 28px; font-weight: 600; line-height: 1.3; }
+  .qhint { display: block; font-size: 20px; font-weight: 600; line-height: 1.4; margin-top: 6px; letter-spacing: .06em; }
+  .qnum { font-size: 60px; font-weight: 600; line-height: 1; margin-top: 20px; }
+  .qlist { margin-top: auto; padding-top: 20px; flex-shrink: 1; min-height: 0; overflow: hidden; }
+  .gi { display: flex; align-items: flex-start; font-size: 23px; line-height: 1.4; margin-bottom: 10px; }
+  .gi:last-child { margin-bottom: 0; }
+  .gi .dot { flex: 0 0 6px; width: 6px; height: 6px; border-radius: 4px; background: #fff; margin-top: 12px; margin-right: 12px; }
+  .gi .tx { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* ---- 悬浮新建（2026-10-09 改：从「屏幕右下角」挪到「矩阵右下角」） ----
+     right/bottom 与 .q 的 padding（26 24 22）对齐，看起来是那一格的一员；
+     这两个数是**常数**，矩阵多高它就跟着走。 */
+  .fab { position: absolute; right: 24px; bottom: 22px; width: 104px; height: 104px;
+         border-radius: 34px; background: #d9303c; color: #fff; z-index: 6;
+         display: flex; align-items: center; justify-content: center;
+         box-shadow: 0 20px 44px -16px rgba(217, 48, 60, .75); }
+  .fab .plus { position: relative; width: 36px; height: 36px; }
+  .fab .plus::before, .fab .plus::after { content: ''; position: absolute; background: #fff; border-radius: 3px; }
+  .fab .plus::before { left: 0; right: 0; top: calc(50% - 2px); height: 4px; }
+  .fab .plus::after { top: 0; bottom: 0; left: calc(50% - 2px); width: 4px; }
+
+  .ovwater { flex: 0 0 auto; margin-top: 24px; }
+  .water { background: #fff; border: 2px solid #e6e9ee; border-radius: 24px; padding: 22px 26px 24px; }
+  .wtop { display: flex; align-items: center; }
+  .wic { flex: 0 0 40px; width: 40px; height: 40px; border-radius: 50%; background: #e8f3fe; margin-right: 14px;
+         display: flex; align-items: center; justify-content: center; font-size: 22px; color: #2e8fe0; }
+  .wname { margin-right: 14px; font-size: 26px; font-weight: 600; color: #111; white-space: nowrap; }
+  .whint { font-size: 21px; color: #8a9099; white-space: nowrap; }
+  .wval { margin-left: auto; font-size: 22px; color: #8a9099; white-space: nowrap; }
+  .wval .wv { font-size: 30px; font-weight: 600; color: #2e8fe0; margin-right: 2px; }
+  .wtrack { position: relative; height: 48px; margin-top: 14px; display: flex; align-items: center; }
+  .wbar { position: relative; flex: 1; height: 14px; border-radius: 8px; background: #dfe5ec; }
+  .wfill { height: 100%; border-radius: 8px; background: #2e8fe0; }
+  .wtick { position: absolute; top: 0; bottom: 0; width: 3px; background: #fff; opacity: .92; }
+  .wknob { position: absolute; top: 50%; width: 32px; height: 32px; margin: -16px 0 0 -16px; border-radius: 50%;
+           background: #fff; border: 5px solid #2e8fe0; box-shadow: 0 2px 8px rgba(16,18,22,.24); }
+
+  .tabbar { flex: 0 0 auto; background: #fff; border-top: 2px solid #eceff3; padding-bottom: 65px; }
+  .tb { height: 120px; display: flex; align-items: center; }
+  .tb .it { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .tb .ic { width: 38px; height: 38px; border-radius: 9px; background: #c9ced6; }
+  .tb .lb { font-size: 20px; color: #8a9099; margin-top: 6px; }
+  .tb .it.on .ic { background: #2563eb; }
+  .tb .it.on .lb { color: #2563eb; }
+
+  .dbg { position: absolute; left: 0; bottom: 0; background: #000; color: #0f0;
+         font: 600 15px/1.45 monospace; padding: 5px 8px; white-space: pre; }
+</style></head>
+<body>
+<div class="screen">
+  <div class="statusbar"></div>
+  <div class="appbar"><div><div class="t">四象限</div><div class="m">10月9日 周五 · 生活</div></div><div style="font-size:34px;color:#333">⚙</div></div>
+  <div class="catsrow"><div class="cat on">生活</div><div class="cat">糖糖</div><div class="cat">鑫鑫</div><div class="cat">+</div></div>
+  <div class="stats">
+    <div class="stat"><div class="n">2</div><div class="l">总计</div></div>
+    <div class="stat"><div class="n">2</div><div class="l">待办</div></div>
+    <div class="stat"><div class="n">0</div><div class="l">已完成</div></div>
+    <div class="stat"><div class="n">0</div><div class="l">待提醒</div></div>
+  </div>
+
+  <div class="ovbody">
+    <div class="ovgrid">
+      <div class="grid">
+        <div class="q q1">
+          <div class="qtop"><div class="qrow"><div class="qmark"></div><div class="qname">重要且紧急</div></div><div class="qhint">立刻做</div></div>
+          <div class="qnum">2</div>
+          <div class="qlist">
+            <div class="gi"><div class="dot"></div><div class="tx">补孕期需要的营养</div></div>
+            <div class="gi"><div class="dot"></div><div class="tx">我妈回家时记得带东西</div></div>
+          </div>
+        </div>
+        <div class="q q2">
+          <div class="qtop"><div class="qrow"><div class="qmark"></div><div class="qname">不重要但紧急</div></div><div class="qhint">授权出去</div></div>
+          <div class="qnum">0</div>
+          <div class="qlist"><div style="font-size:23px;line-height:1.5;opacity:.92">空着挺好<span style="display:block;font-size:21px">点进来放点东西</span></div></div>
+        </div>
+        <div class="q q3">
+          <div class="qtop"><div class="qrow"><div class="qmark"></div><div class="qname">重要不紧急</div></div><div class="qhint">排进日程</div></div>
+          <div class="qnum">0</div>
+          <div class="qlist"><div style="font-size:23px;line-height:1.5;opacity:.92">空着挺好<span style="display:block;font-size:21px">点进来放点东西</span></div></div>
+        </div>
+        <div class="q q4 nb">
+          <div class="qtop"><div class="qrow"><div class="qmark"></div><div class="qname">不重要也不紧急</div></div><div class="qhint">划掉它</div></div>
+          <div class="qnum">0</div>
+          <div class="qlist"><div style="font-size:23px;line-height:1.5;opacity:.92">空着挺好<span style="display:block;font-size:21px">点进来放点东西</span></div></div>
+        </div>
+      </div>
+
+      <!-- 悬浮新建：挂在 .ovgrid 里 → 落点由「不重要也不紧急」那一格决定 -->
+      <div class="fab" id="fab"><span class="plus"></span></div>
+    </div>
+
+    <div class="ovwater">
+      <div class="water">
+        <div class="wtop">
+          <div class="wic">💧</div>
+          <div class="wname">今日饮水</div>
+          <div class="whint">还差 1300 ml</div>
+          <div class="wval"><span class="wv">700</span>/ 2000 ml</div>
+        </div>
+        <div class="wtrack">
+          <div class="wbar">
+            <div class="wfill" style="width:35%"></div>
+            <div class="wtick" style="left:25%"></div>
+            <div class="wtick" style="left:50%"></div>
+            <div class="wtick" style="left:75%"></div>
+          </div>
+          <div class="wknob" style="left:35%"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="tabbar">
+    <div class="tb">
+      <div class="it on"><div class="ic"></div><div class="lb">总览</div></div>
+      <div class="it"><div class="ic"></div><div class="lb">日程</div></div>
+      <div class="it"><div class="ic"></div><div class="lb">全部</div></div>
+      <div class="it"><div class="ic"></div><div class="lb">我的</div></div>
+    </div>
+  </div>
+
+  <div class="dbg" id="dbg"></div>
+</div>
+<script>
+  (function () {
+    var out = [];
+    var scr = document.querySelector('.screen');
+    out.push('屏高 ' + scr.clientHeight + ' / scrollH ' + scr.scrollHeight + ' → ' +
+             (scr.scrollHeight <= scr.clientHeight ? '零溢出 ✓' : '溢出 ✗'));
+
+    var r = function (s) { return document.querySelector(s).getBoundingClientRect(); };
+    var fab = r('#fab'), q4 = r('.q.q4'), water = r('.water'), grid = r('.grid');
+
+    // ① 按钮必须整个落在「不重要也不紧急」那一格里面
+    var inside = fab.left >= q4.left && fab.right <= q4.right &&
+                 fab.top >= q4.top && fab.bottom <= q4.bottom;
+    out.push('「+」' + Math.round(fab.width) + 'px 右' + Math.round(fab.right) + '/底' + Math.round(fab.bottom) +
+             ' → 落在「不重要也不紧急」内 ' + (inside ? '✓' : '✗ 出格了'));
+    out.push('   距那一格 右边 ' + Math.round(q4.right - fab.right) + 'px / 底边 ' +
+             Math.round(q4.bottom - fab.bottom) + 'px（.q 的 padding 是 24/22）');
+
+    // ② 与饮水卡不许有任何重叠 —— 这次修的就是这个
+    var overlap = fab.right > water.left && fab.left < water.right &&
+                  fab.bottom > water.top && fab.top < water.bottom;
+    out.push('与饮水卡重叠 ' + (overlap ? '✗ 仍然压住' : '无 ✓') +
+             '（按钮底 ' + Math.round(fab.bottom) + ' / 饮水卡顶 ' + Math.round(water.top) + '）');
+
+    // ③ 参照系不能是 .screen（那就是老实现）。量一下：距矩阵右下角是不是那两个常数
+    var dr = Math.round(grid.right - fab.right), db = Math.round(grid.bottom - fab.bottom);
+    out.push('距矩阵右下角 ' + dr + ' / ' + db + 'px → ' +
+             (dr === 24 && db === 22 ? '正是那两个常数 ✓（参照系=矩阵）' : '✗ 参照系跑到别处去了'));
+
+    out.push('矩阵底 ' + Math.round(grid.bottom) + 'px   饮水卡 ' + Math.round(water.height) + 'rpx   tab底 ' +
+             Math.round(r('.tabbar').bottom));
+    document.getElementById('dbg').textContent = out.join('\n');
+  })();
+</script>
+</body></html>

@@ -1,0 +1,41 @@
+/* components/fq-sortdone/fq-sortdone.wxss
+   排序模式的固定底栏
+   规则原在 pages/index/index.wxss 里，整段搬来、一字未改。
+   共享资产（自绘图标 .ico-* / 象限图标 .qmark / 按钮 .btn*）留在 app.wxss，
+   靠 styleIsolation: apply-shared 生效 —— 所以这里只有本组件自己的骨架。
+   ============================================================== */
+
+.sortdone {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16rpx 32rpx;
+  padding-bottom: calc(16rpx + env(safe-area-inset-bottom));
+  background: #fff;
+  border-top: 2rpx solid var(--line);
+}
+
+.sortdone .sd-hint {
+  flex: 1;
+  min-width: 0;
+  font-size: 21rpx;
+  line-height: 1.4;
+  color: var(--ink2);
+}
+
+.sortdone .sd-btn {
+  flex: 0 0 auto;
+  margin-left: 20rpx;
+  height: 72rpx;
+  padding: 0 34rpx;
+  border-radius: 999rpx;
+  background: var(--blue);
+  color: #fff;
+  font-size: 26rpx;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+

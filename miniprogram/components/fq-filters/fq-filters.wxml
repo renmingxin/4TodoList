@@ -1,0 +1,13 @@
+<!-- components/fq-filters/fq-filters.wxml
+     详情页筛选（待办 / 已完成 / 全部）
+     从 pages/index/index.wxml 整段搬来。结构一字未改 —— 只有挂在根上的
+     wx:if 挪到了组件标签上（「该不该出现」是页面的事，不是组件的事）。 -->
+    <view class="filters {{sortMode?'lock':''}}">
+      <view
+        class="f {{item.on?'on':''}}"
+        wx:for="{{filters}}"
+        wx:key="k"
+        data-k="{{item.k}}"
+        bindtap="onFilter"
+      >{{item.label}}</view>
+    </view>

@@ -1,0 +1,11 @@
+<!-- components/fq-sortdone/fq-sortdone.wxml
+     排序模式的固定底栏
+     从 pages/index/index.wxml 整段搬来。结构一字未改 —— 只有挂在根上的
+     wx:if 挪到了组件标签上（「该不该出现」是页面的事，不是组件的事）。 -->
+  <!-- ============ 排序模式固定底栏 ============
+       排序期间替代底栏 / Tab：一是「只能做拖动操作」，
+       二是「完成」永远在屏幕上（拖动时列表滚不动，入口按钮可能已经被滚走）。 -->
+  <view class="sortdone">
+    <text class="sd-hint">按住卡片右侧手柄拖动{{view==='all'?'，拖到别的分段即改象限':''}}</text>
+    <view class="sd-btn" bindtap="onSortToggle">完成</view>
+  </view>

@@ -54,6 +54,42 @@
           <text class="tag cat">{{item.catName}}</text>
           <text class="tag time" wx:if="{{item.remindText}}">{{item.remindText}}</text>
         </view>
+
+        <!-- 进度条。始终是卡片里的**最后一行** —— 放到标题上方会打断
+             「先读事项、再看进展」的阅读顺序。
+             它和「完成」不是两个状态，是同一条线的两种读法：拖到 100% 即完成，
+             从 100% 拖回来即自动撤销（耦合钉在云函数 updateItem 里）。
+
+             ⚠️ 下面这串 bind/catch 是三处约定的交点，改之前先看 index.js 的
+                onProgStart 注释：
+                  catchtouchstart → 挡住卡片左滑（两者都是横向手势，只能有一个赢家）
+                  catchtap        → 挡住「点卡片进编辑」，否则拖完松手会顺带弹抽屉
+                  touchmove 用 bind（不是 catch）→ 纵滑原样放过给 scroll-view
+             轨道本体复用 app.wxss 那条共享进度条（今日饮水卡同款）。 -->
+        <view class="prog {{item.done?'full':''}} {{sortMode?'lock':''}}">
+          <view
+            class="wtrack {{item.pgOn?'on':''}}"
+            id="rpt-{{item._id}}"
+            data-id="{{item._id}}"
+            catchtouchstart="onProgStart"
+            bindtouchmove="onProgMove"
+            bindtouchend="onProgEnd"
+            bindtouchcancel="onProgEnd"
+            catchtap="onProgTap"
+          >
+            <view class="wbar">
+              <view class="wfill" style="width:{{item.pct}}%"></view>
+              <view class="wknob" style="left:{{item.pct}}%"></view>
+            </view>
+          </view>
+          <!-- 读数区宽固定，见 index.wxss 的说明。100% 时换成对勾 ——
+               绿的对比度只够图形（3:1），不够正文（4.5:1），
+               所以这个位置永远不放染绿的数字。 -->
+          <view class="rpv">
+            <text wx:if="{{item.done}}">✓</text>
+            <text wx:else>{{item.pct}}%</text>
+          </view>
+        </view>
       </view>
       <!-- 拖动手柄：只在排序模式渲染，是「拖动」与「滚动」的分界线。
            它用 catch 而不是 bind 吃掉 touchstart / touchmove —— 事件不会继续冒泡到
@@ -80,54 +116,13 @@
   <view class="statusbar" style="height:{{statusBarHeight}}px"></view>
 
   <!-- ============ 顶部应用栏（非详情态） ============ -->
-  <view class="appbar" wx:if="{{view!=='detail'}}" style="padding-right:{{capsuleReserve}}px">
-    <view class="appbar-text">
-      <view class="h2">{{pageTitle}}</view>
-      <text class="meta">{{pageMeta}}</text>
-    </view>
-    <view class="iconbtn" bindtap="onGotoMine">
-      <view class="ico ico-sliders">
-        <view class="sl"><view class="kn" style="left:72%"></view></view>
-        <view class="sl"><view class="kn" style="left:28%"></view></view>
-        <view class="sl"><view class="kn" style="left:55%"></view></view>
-      </view>
-    </view>
-  </view>
+    <!-- 顶栏本体在 components/fq-appbar -->
+    <fq-appbar wx:if="{{view!=='detail'}}" page-title="{{pageTitle}}" page-meta="{{pageMeta}}" capsule-reserve="{{capsuleReserve}}" bind:mine="onGotoMine" />
 
-  <!-- ============ 分类胶囊（仅总览） ============
-       右侧「+」固定成独立一列，左边的胶囊自己横向滚动。
-       早先把新增按钮放在 scroll-view 内部，分类一多它就被滚出屏幕，再也点不到。 -->
-  <view wx:if="{{view==='overview'}}" class="catsrow">
-    <!-- flex 容器必须放在 scroll-view 内部（.cats-inner）：
-         直接给 scroll-view 写 display:flex（配 enable-flex）实测无效，
-         胶囊会按行内盒排在文字基线上，被 scroll-view 的 overflow:hidden
-         从顶部裁掉约 13px（表现为「标签块被遮挡 + 文字不居中」）。 -->
-    <scroll-view class="cats" scroll-x>
-      <view class="cats-inner">
-        <view
-          class="cat {{item.on?'on':''}}"
-          wx:for="{{catTabs}}"
-          wx:key="id"
-          data-k="{{item.id}}"
-          bindtap="onPickCat"
-        >
-          <text>{{item.name}}</text>
-          <text class="cnt">{{item.count}}</text>
-        </view>
-      </view>
-    </scroll-view>
-    <view class="cats-add" bindtap="onAddCategory">
-      <view class="ico ico-plus"></view>
-    </view>
-  </view>
+<fq-cats wx:if="{{view==='overview'}}" cat-tabs="{{catTabs}}" bind:pick="onPickCat" bind:add="onAddCategory" />
 
   <!-- ============ 统计条（仅总览） ============ -->
-  <view class="stats" wx:if="{{view==='overview'}}">
-    <view class="stat" wx:for="{{stats}}" wx:key="k">
-      <view class="v num">{{item.v}}</view>
-      <view class="k">{{item.k}}</view>
-    </view>
-  </view>
+    <fq-stats wx:if="{{view==='overview'}}" stats="{{stats}}" />
 
   <!-- ============ 固定头部（详情 / 全部） ============
        列表长了以后，头部不能跟着滚走。所以 dhead / filters / sortrow / 提示行
@@ -135,33 +130,9 @@
        （flex:0 0 auto），只有事项列表在滚动区里。
        排序模式下 sortrow 与提示行整组隐藏（那时只允许拖卡片右侧的手柄）。 -->
   <block wx:if="{{view==='detail'}}">
-    <view class="dhead {{quad}}">
-      <view class="bar" style="padding-right:{{capsuleReserve}}px">
-        <view class="bar-btn" bindtap="onBack"><view class="ico ico-chev-l"></view></view>
-        <view class="h3">{{quadName}}</view>
-        <view class="bar-btn {{sortMode?'lock':''}}" bindtap="onQuadMenu">
-          <view class="ico ico-dots"><view class="d"></view><view class="d"></view><view class="d"></view></view>
-        </view>
-      </view>
-      <!-- 图标 + 象限性质胶囊一行，数字与「项待办」说明在其下。
-           图标与总览页共用同一个 .qmark，靠 .dhead.q1 这类祖先类选字形。 -->
-      <view class="dmeta">
-        <view class="qmark"></view>
-        <view class="hintpill">{{quadHint}}</view>
-      </view>
-      <view class="big num">{{quadUndone}}</view>
-      <text class="cap">{{quadCap}}</text>
-    </view>
+<fq-dhead wx:if="{{view==='detail'}}" quad="{{quad}}" quad-name="{{quadName}}" quad-hint="{{quadHint}}" quad-undone="{{quadUndone}}" quad-cap="{{quadCap}}" capsule-reserve="{{capsuleReserve}}" sort-mode="{{sortMode}}" bind:back="onBack" bind:menu="onQuadMenu" />
 
-    <view class="filters {{sortMode?'lock':''}}">
-      <view
-        class="f {{item.on?'on':''}}"
-        wx:for="{{filters}}"
-        wx:key="k"
-        data-k="{{item.k}}"
-        bindtap="onFilter"
-      >{{item.label}}</view>
-    </view>
+<fq-filters filters="{{filters}}" sort-mode="{{sortMode}}" bind:filter="onFilter" />
 
     <block wx:if="{{!sortMode}}">
       <!-- 排序入口：点开后只允许拖动卡片，其余按钮全部锁住 -->
@@ -203,48 +174,115 @@
 
        scroll-top 只有一个用途：拖到屏幕边缘时列表自己滚（见 JS 的 runAutoScroll）。
        bindscroll 用来把真实滚动量同步回行位置快照，手动滚、自动滚共用同一条回路。 -->
+  <!-- ============ 总览页主体（一屏装满，刻意不滚动） ============
+       总览页没有长列表，所以**不套 scroll-view**。套了就得靠「内容高恰好等于
+       滚动区高」来避免滚动 —— 那是算出来的巧合，屏幕一矮就冒出一条滚动尾巴。
+       这里改用与底部 tab 同一套的 flex 分配：
+         .ovbody 吃掉固定块之外的全部高度，内部是一列
+           矩阵容器 flex:1   → 自适应撑满剩余高度
+           饮水卡   flex:0 0 auto → 按自身内容高，不被压缩
+       屏幕再矮也不会「滚」，只会让矩阵变矮（纯展示，压不坏）。
+       ⚠️ 不给它写死高度、也不用 JS 算 —— 见 index.wxss 顶部第 6-9 行。 -->
+  <view wx:if="{{view==='overview'}}" class="ovbody">
+    <view wx:if="{{!ready}}" class="loading-hint">加载中…</view>
+    <block wx:else>
+      <!-- 矩阵在上、饮水在下：矩阵是主角，一眼先看到；
+           饮水条是「今天顺手记一笔」的辅助，放它下面不抢视线。 -->
+      <!-- 悬浮新建按钮挂在**矩阵容器内部**，不在屏幕右下角。
+           它的落点由「不重要也不紧急」那一格决定，而那一格的高度是 flex
+           分配出来的（屏幕变矮 → 矩阵变矮）。挂在 .screen 上就只能靠 JS 算出的
+           px 去追，屏幕一变就不准 —— 实测矮屏上它会压住下面的饮水条；
+           挂进 .ovgrid，absolute 的参照系就是矩阵本身，偏移量成了常数。
+           ⚠️ 组件是 virtualHost，.fab 直接就是 .ovgrid 的子节点，
+              所以 .ovgrid 必须 position:relative（见 index.wxss）。 -->
+      <view class="ovgrid">
+        <fq-quad fill grid="{{grid}}" bind:open="onOpenQuad" />
+        <fq-fab bind:create="onNew" />
+      </view>
+      <view class="ovwater"><fq-water ml="{{waterMl}}" goal="{{waterGoal}}" bind:change="onWaterChange" /></view>
+    </block>
+  </view>
+
+  <!-- ============ 日程页主体 ============
+       月历固定在顶部，剩下的（日期头 + 两张计划卡 + 当天事项）一起滚动。
+       为什么月历不跟着滚：点任意一天是这一页的核心动作，日历被列表滚走之后
+       想换一天就得先滚回去 —— 这正是「固定头部」那条约定的本意
+       （凡是高频切回来用的块，都不该在滚动区里）。
+       与总览页同一套分配：固定块 flex:0 0 auto，滚动块 flex:1 + min-height:0。 -->
+  <view wx:if="{{view==='sched'}}" class="schedwrap">
+    <view class="schcal">
+      <fq-cal
+        label="{{calLabel}}"
+        cells="{{calCells}}"
+        attoday="{{calAtToday}}"
+        bind:prev="onCalPrev"
+        bind:next="onCalNext"
+        bind:today="onCalToday"
+        bind:pick="onCalPick"
+      />
+    </view>
+
+    <scroll-view class="schbody" scroll-y>
+      <view class="dayh">
+        <text class="d">{{schedDayLabel}}</text>
+        <text class="now" wx:if="{{schedBadge}}">{{schedBadge}}</text>
+        <text class="r">{{schedCount}}</text>
+      </view>
+
+      <!-- 两张计划卡：kind 决定色条与图标，内容全部由页面按选中日算好。
+           两张卡共用 onPlanEdit，靠 e.detail.kind 分辨是哪一张。 -->
+      <fq-plan
+        kind="day"
+        label="{{planDay.label}}"
+        date-short="{{planDay.dateShort}}"
+        text="{{planDay.text}}"
+        placeholder="{{planDay.placeholder}}"
+        bind:edit="onPlanEdit"
+      />
+      <fq-plan
+        kind="next"
+        label="{{planNext.label}}"
+        date-short="{{planNext.dateShort}}"
+        text="{{planNext.text}}"
+        placeholder="{{planNext.placeholder}}"
+        bind:edit="onPlanEdit"
+      />
+
+      <!-- 这一段的口径是「那天的**提醒**」，不是「那天的排期」：
+           fq_items 里没有日期字段，只有 remindAt。所以标题照实写，
+           空态也说清楚「带提醒的」—— 它同时是这块功能的说明书。
+           ⚠️ 它与日历上圆点的口径必须完全一致（见 index.js 的 itemDays），
+              否则会出现「有圆点但点进去是空的」。 -->
+      <view class="dsec">
+        <text class="t">这天的事项</text>
+        <view class="ln"></view>
+      </view>
+      <block wx:if="{{schedRows.length}}">
+        <view
+          class="minirow"
+          wx:for="{{schedRows}}"
+          wx:key="_id"
+          data-id="{{item._id}}"
+          bindtap="onSchedRow"
+        >
+          <view class="qq {{item.q}}"></view>
+          <text class="tt {{item.done?'dn':''}}">{{item.title}}</text>
+          <text class="pp">{{item.tail}}</text>
+        </view>
+      </block>
+      <text class="dempty" wx:else>这一天没有带提醒的事项</text>
+    </scroll-view>
+  </view>
+
+  <!-- 其余三页（detail / all / mine）才有长列表，照旧装在滚动区里。
+       总览与日程各有一套自己的容器，所以这里要把它们两个都排除 ——
+       不互斥的话，屏幕上会出现两个 flex:1 的兄弟平分高度。 -->
+  <block wx:if="{{view!=='overview' && view!=='sched'}}">
   <scroll-view class="scroller" scroll-y scroll-top="{{scrollTop}}" bindscroll="onScrollerScroll">
     <view class="body {{view==='detail' ? 'flush' : (view==='all' ? 'tight' : '')}}" bindtap="onBlankTap">
 
       <!-- ---------- 首屏加载 ---------- -->
       <view wx:if="{{!ready}}" class="loading-hint">加载中…</view>
-
-      <!-- ---------- 总览：2×2 满色矩阵 ---------- -->
-      <block wx:elif="{{view==='overview'}}">
-        <view class="grid">
-          <view
-            class="q {{item.key}} {{item.nb?'nb':''}}"
-            wx:for="{{grid}}"
-            wx:key="key"
-            data-k="{{item.key}}"
-            bindtap="onOpenQuad"
-          >
-            <view class="qtop">
-              <!-- 图标与象限名同一行；白圆底 + 同象限色字形。
-                   字形（火焰 / 闪电 / 灯泡 / 咖啡杯）按 .q1~.q4 祖先类选，
-                   所以这里不需要传 key —— 卡片本身就是 .q.q1 这样带象限类的。 -->
-              <view class="qrow">
-                <view class="qmark"></view>
-                <text class="qname">{{item.name}}</text>
-              </view>
-              <text class="qhint">{{item.hint}}</text>
-            </view>
-            <view class="qnum num">{{item.count}}</view>
-            <view class="qlist">
-              <block wx:if="{{item.empty}}">
-                <view class="gempty">空着挺好<text class="s">点进来放点东西</text></view>
-              </block>
-              <block wx:else>
-                <view class="gi" wx:for="{{item.lines}}" wx:for-item="ln" wx:key="idx">
-                  <view class="dot" style="{{ln.more?'background:transparent':''}}"></view>
-                  <text class="tx">{{ln.text}}</text>
-                </view>
-              </block>
-            </view>
-          </view>
-        </view>
-        <text class="swipecue">矩阵按「重要性 × 紧急性」排列 · 外角朝外的是最高优先级</text>
-      </block>
 
       <!-- ---------- 象限详情：头部已在固定区，这里只剩滚动主体 ---------- -->
       <block wx:elif="{{view==='detail'}}">
@@ -284,12 +322,7 @@
 
       <!-- ---------- 我的 ---------- -->
       <block wx:else>
-        <view class="stats flat">
-          <view class="stat" wx:for="{{mineStats}}" wx:key="k">
-            <view class="v num">{{item.v}}</view>
-            <view class="k">{{item.k}}</view>
-          </view>
-        </view>
+          <fq-stats flat stats="{{mineStats}}" />
 
         <view class="mecard">
           <view class="h4">家庭</view>
@@ -372,53 +405,16 @@
 
     </view>
   </scroll-view>
+  </block>
 
-  <!-- ============ 悬浮新建（仅总览） ============ -->
-  <view class="fab" wx:if="{{view==='overview'}}" style="bottom:{{fabBottom}}px" bindtap="onNew">
-    <view class="ico ico-plus big"></view>
-  </view>
+    <!-- ============ 排序模式固定底栏 → components/fq-sortdone ============ -->
+    <fq-sortdone wx:if="{{sortMode}}" view="{{view}}" bind:toggle="onSortToggle" />
 
-  <!-- ============ 排序模式固定底栏 ============
-       排序期间替代底栏 / Tab：一是「只能做拖动操作」，
-       二是「完成」永远在屏幕上（拖动时列表滚不动，入口按钮可能已经被滚走）。 -->
-  <view class="sortdone" wx:if="{{sortMode}}">
-    <text class="sd-hint">按住卡片右侧手柄拖动{{view==='all'?'，拖到别的分段即改象限':''}}</text>
-    <view class="sd-btn" bindtap="onSortToggle">完成</view>
-  </view>
+    <!-- ============ 详情页底部主按钮 → components/fq-bottombar ============ -->
+    <fq-bottombar wx:if="{{view==='detail' && !sortMode}}" bind:new-here="onNewHere" />
 
-  <!-- ============ 详情页底部主按钮 ============ -->
-  <view class="bottombar" wx:if="{{view==='detail' && !sortMode}}">
-    <view class="btn dark" bindtap="onNewHere">
-      <view class="ico ico-plus sm"></view>
-      <text>在此象限新建</text>
-    </view>
-  </view>
-
-  <!-- ============ 底部 Tab ============ -->
-  <view class="tabbar" wx:if="{{view!=='detail' && !sortMode}}">
-    <view class="tb {{view==='overview'?'on':''}}" data-k="overview" bindtap="onTab">
-      <view class="tbi">
-        <view class="ico ico-grid">
-          <view class="c"></view><view class="c"></view><view class="c"></view><view class="c"></view>
-        </view>
-      </view>
-      <text class="lbl">总览</text>
-    </view>
-    <view class="tb {{view==='all'?'on':''}}" data-k="all" bindtap="onTab">
-      <view class="tbi">
-        <view class="ico ico-list">
-          <view class="c"></view><view class="c"></view><view class="c short"></view>
-        </view>
-      </view>
-      <text class="lbl">全部</text>
-    </view>
-    <view class="tb {{view==='mine'?'on':''}}" data-k="mine" bindtap="onTab">
-      <view class="tbi">
-        <view class="ico ico-user"><view class="h"></view><view class="b"></view></view>
-      </view>
-      <text class="lbl">我的</text>
-    </view>
-  </view>
+    <!-- ============ 底部 Tab → components/fq-tabbar ============ -->
+    <fq-tabbar wx:if="{{view!=='detail' && !sortMode}}" view="{{view}}" bind:pick="onTab" />
 
   <!-- ============ 遮罩 + 底部抽屉 ============ -->
   <view class="scrim {{sheetOpen?'on':''}}" bindtap="closeSheet"></view>
@@ -479,6 +475,32 @@
         </view>
         <text class="sd" style="margin:16rpx 0 0">移到别的分类不会丢数据；一并删除不可恢复。</text>
       </scroll-view>
+    </block>
+
+    <!-- 日程计划：写「这一天 / 次日」要做什么。
+         标题与副标题由页面按选中日算好（「今天要做什么」+「10月9日 周五」），
+         所以同一个抽屉既能写今天也能写任意一天，文案不会错位。
+         空文本保存 = 删掉这天的计划，与云函数 savePlan 同一套语义。 -->
+    <block wx:elif="{{sheetKind==='plan'}}">
+      <view class="h3">{{sheetTitle}}</view>
+      <text class="sd">{{sheetSub}}</text>
+      <scroll-view class="sheet-body" scroll-y>
+        <view class="field">
+          <text class="label">计划内容</text>
+          <textarea
+            class="textarea"
+            value="{{planDraft}}"
+            placeholder="写给自己看的一句话就行"
+            placeholder-class="ph"
+            maxlength="{{planMax}}"
+            bindinput="onInputPlan"
+          />
+        </view>
+        <text class="sd" style="margin:16rpx 0 0">保存即生效。把内容清空再保存，就等于删掉这一天的计划。</text>
+      </scroll-view>
+      <view class="sheet-foot">
+        <view class="btn primary" bindtap="onSavePlan">保存</view>
+      </view>
     </block>
 
     <!-- 新建 / 编辑 -->

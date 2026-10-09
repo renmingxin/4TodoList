@@ -1,0 +1,243 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>事项进度条 · 布局实测</title>
+<style>
+  /* 换算：1rpx = 1px。画布 = iPhone 14 Pro → 750×1626（与 final-sched.html 同一把尺）。
+     ⚠️ 这里是「把 WXSS 抄成 HTML」，不是「照着印象画一个像的」——
+        每个数字都能在源码里指回出处：
+          共享进度条   → app.wxss  「共享：进度条（今日饮水 / 事项进度）」
+          卡片自身的三件事 → index.wxss「事项进度条」段
+          卡片骨架     → index.wxss .rows-wrap / .row / .row-in / .tx / .tags / .tag */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 750px; height: 1626px; overflow: hidden; }
+  body { font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         background: #f4f5f7; color: #16181c; font-size: 28px; line-height: 1.6;
+         -webkit-font-smoothing: antialiased; }
+
+  :root {
+    --q1: #d9303c; --q2: #9e6c00; --q3: #c04e18; --q4: #6b7280;
+    --ink: #16181c; --ink2: #5b6472; --ink3: #98a0ac;
+    --line: #e4e7ec; --line2: #f1f3f6; --bg: #f4f5f7;
+    --blue: #2563eb; --ok: #12a150;
+  }
+  .q1 { --qc: var(--q1); } .q2 { --qc: var(--q2); }
+  .q3 { --qc: var(--q3); } .q4 { --qc: var(--q4); }
+
+  .screen { position: absolute; top: 0; left: 0; width: 750px; height: 1626px;
+            display: flex; flex-direction: column; background: var(--bg); overflow: hidden; }
+  .statusbar { flex: 0 0 auto; height: 59px; }
+  .appbar { flex: 0 0 auto; height: 88px; display: flex; align-items: center;
+            justify-content: space-between; padding: 0 32px; }
+  .appbar .t { font-size: 36px; font-weight: 700; }
+  .appbar .m { font-size: 22px; color: var(--ink3); margin-top: 2px; }
+
+  .scroller { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0; }
+  .rows-wrap { padding: 20px 32px 24px; }
+
+  /* ---- 卡片骨架：index.wxss ---- */
+  .row { position: relative; border-radius: 24px; background: var(--line2); margin-bottom: 16px; }
+  .row-in { position: relative; background: #fff; border: 2px solid var(--line);
+            border-radius: 24px; padding: 22px 24px 22px 30px;
+            display: flex; align-items: flex-start; }
+  .row-in::before { content: ""; position: absolute; left: 0; top: 22px; bottom: 22px;
+                    width: 6px; border-radius: 0 6px 6px 0; background: var(--qc); }
+  .tx { flex: 1; min-width: 0; }
+  .t { display: block; font-size: 28px; font-weight: 500; line-height: 1.4; letter-spacing: -.005em; }
+  .n { display: block; font-size: 23px; color: var(--ink3); line-height: 1.45; margin-top: 4px; }
+  .tags { display: flex; flex-wrap: wrap; align-items: center; margin-top: 14px; margin-right: -10px; }
+  .tag { display: inline-block; height: 36px; line-height: 36px; padding: 0 12px;
+         font-size: 20px; font-weight: 600; border-radius: 10px;
+         background: var(--line2); color: var(--ink2); margin-right: 10px; }
+  .tag.pri { background: #fff1f2; color: var(--q1); }
+  .tag.cat { background: #eff4ff; color: var(--blue); }
+  .tag.time { background: #ecfdf3; color: #0b7a3c; }
+
+  /* ---- 共享：进度条（app.wxss 逐字抄） ---- */
+  .wtrack { position: relative; height: 48px; display: flex; align-items: center; }
+  .wbar { position: relative; flex: 1; height: 14px; border-radius: 8px;
+          background: #dfe5ec; transition: background .2s; }
+  .wfill { height: 100%; border-radius: 8px; background: var(--wt, var(--ink3)); transition: background .25s; }
+  .wknob { position: absolute; top: 50%; width: 32px; height: 32px; margin: -16px 0 0 -16px;
+           border-radius: 50%; background: #fff; border: 5px solid var(--wt, var(--ink3));
+           box-shadow: 0 2px 8px rgba(16, 18, 22, .24);
+           transition: transform .12s ease, border-color .25s ease; }
+  .wtrack.on .wbar { background: #d3dae3; }
+  .wtrack.on .wknob { transform: scale(1.24); }
+
+  /* ---- 事项进度条：index.wxss 只补的三件事 ---- */
+  .prog { display: flex; align-items: center; margin-top: 14px; --wt: var(--qc, var(--ink3)); }
+  .prog.full { --wt: var(--ok); }
+  .prog .wtrack { flex: 1; min-width: 0; }
+  .rpv { flex: 0 0 68px; display: flex; align-items: center; justify-content: flex-end;
+         font-size: 22px; font-weight: 600; color: var(--ink3); }
+  .row.done .row-in { opacity: .5; }
+  .row.done .row-in .t { text-decoration: line-through; }
+
+  /* 对照组：把进度行摘掉，用来量「进度行给卡片加了多少高」。
+     只在这一张卡上 display:none —— 不能改其它卡的 DOM，否则量不到差值。 */
+  .noprog .prog { display: none; }
+
+  .dbg { position: absolute; left: 0; bottom: 0; background: #000; color: #0f0;
+         font: 600 15px/1.5 monospace; padding: 5px 8px; white-space: pre; }
+</style></head>
+<body>
+<div class="screen">
+  <div class="statusbar"></div>
+  <div class="appbar"><div><div class="t">紧急重要</div><div class="m">拖进度条到 100% 即完成</div></div></div>
+
+  <div class="scroller"><div class="rows-wrap" id="wrap">
+
+    <!-- A：0% —— 只露出一个贴左边缘的圆点（故意有一半悬在轨道外，那是「到头了」的提示） -->
+    <div class="row q1" id="cA"><div class="row-in"><div class="tx">
+      <span class="t">给客户回电话确认合同细节</span>
+      <span class="n">顺带问一下发票抬头怎么写</span>
+      <div class="tags"><span class="tag pri">P1</span><span class="tag cat">工作</span><span class="tag time">明天 09:00</span></div>
+      <div class="prog"><div class="wtrack" id="tA"><div class="wbar" id="bA">
+        <div class="wfill" id="fA" style="width:0%"></div><div class="wknob" id="kA" style="left:0%"></div>
+      </div></div><div class="rpv" id="rA">0%</div></div>
+    </div></div></div>
+
+    <!-- B：45% —— 中间态，圆点应当正落在 45% 处 -->
+    <div class="row q2" id="cB"><div class="row-in"><div class="tx">
+      <span class="t">把季度复盘文档写完</span>
+      <div class="tags"><span class="tag pri">P2</span><span class="tag cat">工作</span></div>
+      <div class="prog"><div class="wtrack" id="tB"><div class="wbar" id="bB">
+        <div class="wfill" id="fB" style="width:45%"></div><div class="wknob" id="kB" style="left:45%"></div>
+      </div></div><div class="rpv" id="rB">45%</div></div>
+    </div></div></div>
+
+    <!-- C：100% —— 完成态：--wt 换成 --ok，读数换成对勾（绿只上图形，不上文字） -->
+    <div class="row q3 done" id="cC"><div class="row-in"><div class="tx">
+      <span class="t">交物业费</span>
+      <div class="tags"><span class="tag pri">P3</span><span class="tag cat">生活</span></div>
+      <div class="prog full"><div class="wtrack" id="tC"><div class="wbar" id="bC">
+        <div class="wfill" id="fC" style="width:100%"></div><div class="wknob" id="kC" style="left:100%"></div>
+      </div></div><div class="rpv" id="rC">✓</div></div>
+    </div></div></div>
+
+    <!-- D：9% —— 和 C 成对：读数从「9%」变「✓」时轨道长度必须纹丝不动 -->
+    <div class="row q4" id="cD"><div class="row-in"><div class="tx">
+      <span class="t">读两章《人类简史》</span>
+      <div class="tags"><span class="tag pri">P4</span><span class="tag cat">生活</span></div>
+      <div class="prog"><div class="wtrack" id="tD"><div class="wbar" id="bD">
+        <div class="wfill" id="fD" style="width:9%"></div><div class="wknob" id="kD" style="left:9%"></div>
+      </div></div><div class="rpv" id="rD">9%</div></div>
+    </div></div></div>
+
+    <!-- E：对照组，摘掉进度行 -->
+    <div class="row q1 noprog" id="cE"><div class="row-in"><div class="tx">
+      <span class="t">对照组：同一张卡但没有进度行</span>
+      <div class="tags"><span class="tag pri">P1</span><span class="tag cat">工作</span></div>
+    </div></div></div>
+
+  </div></div>
+
+  <div class="dbg" id="dbg"></div>
+</div>
+<script>
+(function () {
+  var R = function (n) { return Math.round(n * 10) / 10; };
+  var box = function (s) { return document.querySelector(s).getBoundingClientRect(); };
+  var out = [];
+
+  var scr = document.querySelector('.screen');
+  out.push('屏幕 ' + scr.clientWidth + '×' + scr.clientHeight + ' / scrollH ' + scr.scrollHeight +
+           ' → ' + (scr.scrollHeight <= scr.clientHeight ? '零溢出 ✓' : '溢出 ✗'));
+
+  // ① 三个尺寸必须分别等于 14 / 32 / 48（触区留白是手指容错的那 17px 上下边）
+  var barH = R(box('#bA').height);
+  var knobW = R(box('#kC').width), knobH = R(box('#kC').height);
+  var trkH = R(box('#tA').height);
+  out.push('轨道高 ' + barH + '（=14? ' + (barH === 14 ? '✓' : '✗') + '）   圆点 ' + knobW + '×' + knobH +
+           '（=32? ' + (knobW === 32 && knobH === 32 ? '✓' : '✗') + '）   触区高 ' + trkH +
+           '（=48? ' + (trkH === 48 ? '✓' : '✗') + '）');
+
+  // ② 触区必须比圆点高：手指落点容错，而不是要求对准 14px 的细线
+  out.push('触区 − 圆点 = ' + R(trkH - knobH) + 'px 上下合计 → ' +
+           (trkH - knobH === 16 ? '✓ 每侧多 8px' : '✗'));
+
+  // ③ 四张卡的轨道宽必须逐一相等：读数从「0%/9%/45%」变「✓」时轨道长度不许被推挤
+  var ids = ['A', 'B', 'C', 'D'];
+  var ws = ids.map(function (k) { return R(box('#b' + k).width); });
+  var min = Math.min.apply(null, ws), max = Math.max.apply(null, ws);
+  out.push('轨道宽 ' + ws.join(' / ') + ' → ' + (max - min <= 0.5
+    ? '读数位数变化不影响轨道 ✓'
+    : '✗ 位数把轨道顶宽了 ' + R(max - min) + 'px'));
+
+  // ④ 轨道宽必须等于「卡片内容宽 − 读数区」：读数区写死 68rpx 才有上面那条
+  var tx = box('#cB .tx').width;
+  var expBar = R(tx - 68);
+  out.push('轨道 ' + ws[1] + ' vs .tx ' + R(tx) + ' − 68 = ' + expBar + ' → ' +
+           (Math.abs(ws[1] - expBar) <= 0.5 ? '读数区正好 68rpx ✓' : '✗ 对不上'));
+
+  // ⑤ 圆点圆心必须落在 pct% 处（left 用百分比 + 负 margin 让百分比表示圆心）
+  [['A', 0], ['B', 45], ['C', 100], ['D', 9]].forEach(function (p) {
+    var b = box('#b' + p[0]), k = box('#k' + p[0]);
+    var wantX = b.left + b.width * p[1] / 100;
+    var gotX = k.left + k.width / 2;
+    var dx = Math.abs(wantX - gotX);
+    var wantY = b.top + b.height / 2;
+    var gotY = k.top + k.height / 2;
+    var dy = Math.abs(wantY - gotY);
+    out.push(' ' + p[1] + '% 圆点 → 水平偏心 ' + R(dx) + 'px ' + (dx <= 0.5 ? '✓' : '✗') +
+             ' / 垂直偏心 ' + R(dy) + 'px ' + (dy <= 0.5 ? '✓' : '✗'));
+  });
+
+  // ⑥ 填充宽必须正好是 pct% 的条宽（自绘填充靠 width:% 撑）
+  [['A', 0], ['B', 45], ['D', 9]].forEach(function (p) {
+    var b = box('#b' + p[0]), f = box('#f' + p[0]);
+    var want = b.width * p[1] / 100;
+    var d = Math.abs(want - f.width);
+    out.push(' ' + p[1] + '% 填充宽 ' + R(f.width) + ' vs 应为 ' + R(want) +
+             ' → ' + (d <= 0.5 ? '✓' : '✗ 差 ' + R(d)));
+  });
+  var fw = box('#fC').width, bw = box('#bC').width;
+  out.push(' 100% 填充 ' + R(fw) + ' vs 轨道 ' + R(bw) + ' → ' +
+           (Math.abs(fw - bw) <= 0.5 ? '✓ 拉满' : '✗ 差 ' + R(bw - fw)));
+
+  // ⑦ 进度行给卡片加了多少高：必须正好 = 触区 48 + 上边距 14
+  var hWith = R(box('#cB .row-in').height), hRef = R(box('#cE .row-in').height);
+  var dh = R(hWith - hRef);
+  out.push('卡片高（有进度行 / 对照组）= ' + hWith + ' / ' + hRef + '   差 ' + dh +
+           ' → ' + (dh === 62 ? '✓ = 48 + 14' : '✗ 应为 62'));
+
+  // ⑧ 颜色：未完成读象限色，完成读完成绿；且绿只上「图形」
+  var fillIdle = getComputedStyle(document.querySelector('#fB')).backgroundColor;
+  var fillDone = getComputedStyle(document.querySelector('#fC')).backgroundColor;
+  var knobDone = getComputedStyle(document.querySelector('#kC')).borderTopColor;
+  out.push('未完成填充（q2）' + fillIdle + ' → ' + (fillIdle === 'rgb(158, 108, 0)' ? '✓ 象限色' : '✗'));
+  out.push('完成填充 ' + fillDone + ' / 描边 ' + knobDone + ' → ' +
+           (fillDone === 'rgb(18, 161, 80)' && knobDone === 'rgb(18, 161, 80)' ? '✓ 完成绿' : '✗'));
+
+  // ⑨ 读数区永远是灰字、100% 时换对勾 —— 绿只够图形（3:1），不够正文（4.5:1）
+  var rvDone = document.querySelector('#rC');
+  var color = getComputedStyle(rvDone).color;
+  out.push('完成态读数「' + rvDone.textContent.trim() + '」色 ' + color + ' → ' +
+           (color === 'rgb(152, 160, 172)' && rvDone.textContent.trim() === '✓'
+             ? '✓ 灰字 + 对勾（没有染绿的文字）' : '✗'));
+
+  // ⑩ 完成绿的对比度：图形门槛 3:1 过关，正文门槛 4.5:1 不过关 —— 这正是 ⑨ 的由来
+  var lum = function (hex) {
+    var c = [1, 3, 5].map(function (i) {
+      var v = parseInt(hex.substr(i, 2), 16) / 255;
+      return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+    });
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  };
+  var cg = (1.05) / (lum('#12a150') + 0.05);
+  out.push('完成绿 #12a150 vs 白 对比度 ' + R(cg) + ':1 → 图形门槛 3:1 ' +
+           (cg >= 3 ? '✓' : '✗') + ' / 正文门槛 4.5:1 ' + (cg >= 4.5 ? '✓' : '✗ 证毕：不能染色文字'));
+
+  document.getElementById('dbg').textContent = out.join('\n');
+
+  /* 放大镜：加 #audit 打开同一份结论的大字号版 —— 底部那个黑框是给"一眼看形状"用的，
+     逐字核对 ✓/✗ 得靠这一页（截图分辨率下 15px 的勾叉分不出来）。 */
+  if (location.hash === '#audit') {
+    var ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;inset:0;background:#fff;color:#111;overflow:auto;' +
+      'font:500 24px/1.75 ui-monospace,Consolas,monospace;padding:24px 20px;white-space:pre-wrap;z-index:9';
+    ov.textContent = '事项进度条 · 布局验收（1rpx = 1px）\n\n' + out.join('\n');
+    document.body.appendChild(ov);
+  }
+})();
+</script>
+</body></html>

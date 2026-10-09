@@ -1,0 +1,37 @@
+<!-- components/fq-tabbar/fq-tabbar.wxml
+     底部 Tab（总览 / 日程 / 全部 / 我的）
+     从 pages/index/index.wxml 整段搬来。结构一字未改 —— 只有挂在根上的
+     wx:if 挪到了组件标签上（「该不该出现」是页面的事，不是组件的事）。 -->
+  <!-- ============ 底部 Tab ============ -->
+  <view class="tabbar">
+    <view class="tb {{view==='overview'?'on':''}}" data-k="overview" bindtap="onTab">
+      <view class="tbi">
+        <view class="ico ico-grid">
+          <view class="c"></view><view class="c"></view><view class="c"></view><view class="c"></view>
+        </view>
+      </view>
+      <text class="lbl">总览</text>
+    </view>
+    <!-- 日程排在第二个：它和总览一起构成「今天看什么」——
+         总览答「哪一格」，日程答「哪一天」，两者正交，挨着才好来回切。 -->
+    <view class="tb {{view==='sched'?'on':''}}" data-k="sched" bindtap="onTab">
+      <view class="tbi">
+        <view class="ico ico-cal"></view>
+      </view>
+      <text class="lbl">日程</text>
+    </view>
+    <view class="tb {{view==='all'?'on':''}}" data-k="all" bindtap="onTab">
+      <view class="tbi">
+        <view class="ico ico-list">
+          <view class="c"></view><view class="c"></view><view class="c short"></view>
+        </view>
+      </view>
+      <text class="lbl">全部</text>
+    </view>
+    <view class="tb {{view==='mine'?'on':''}}" data-k="mine" bindtap="onTab">
+      <view class="tbi">
+        <view class="ico ico-user"><view class="h"></view><view class="b"></view></view>
+      </view>
+      <text class="lbl">我的</text>
+    </view>
+  </view>

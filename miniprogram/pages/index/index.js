@@ -7,211 +7,87 @@
 // 数据源：云函数 fqTodo（唯一出口）。本地只做一次内存镜像 + 乐观更新，
 // 每次改动先改本地立即重绘，再异步落库；落库失败回滚到服务端状态。
 
-// 象限文案唯一来源：QUADS 是列表，QUAD_MAP 是按 key 查
-const QUADS = [
-  { key: 'q1', name: '重要且紧急', hint: '立刻做' },
-  { key: 'q2', name: '不重要但紧急', hint: '授权出去' },
-  { key: 'q3', name: '重要不紧急', hint: '排进日程' },
-  { key: 'q4', name: '不重要也不紧急', hint: '划掉它' },
-];
+/* ---------------- 依赖 ---------------- */
 
-const QUAD_MAP = QUADS.reduce(function (m, q) {
-  m[q.key] = q;
-  return m;
-}, {});
+// 本文件只负责「页面」这一件事：视图状态机 + data 装配 + 事件编排。
+// 常量去 utils/const.js，纯函数去 utils/format.js，云调用去 services/cloud.js，
+// 拖动排序的状态机去 utils/drag.js（文件末尾 Object.assign 进来）。
+//
+// ⚠️ 拆文件不改变「谁是唯一出口」这类约定：云调用仍然只经 services/cloud.js，
+// 页面里不会出现第二处 wx.cloud.callFunction。
+const {
+  QUADS,
+  QUAD_MAP,
+  LAYOUT,
+  ORDER_STEP,
+  REORDER_CAP,
+  FN_VER,
+  SYNC_MS,
+  WATER_GOAL,
+  WATER_KEY,
+  PLAN_MAX,
+  CAL_CELLS,
+} = require('../../utils/const.js');
+const {
+  pad2,
+  todayStr,
+  todayMeta,
+  remindText,
+  remindDayShort,
+  toTimestamp,
+  normCode,
+  inviteLabel,
+  addDays,
+  dayDiff,
+  dayKey,
+  hhmm,
+  dayWord,
+  ymOf,
+  monthLabel,
+  mdShort,
+  dateCN,
+  planLabels,
+} = require('../../utils/format.js');
+const cloud = require('../../services/cloud.js');
+const drag = require('../../utils/drag.js');
 
-// 布局常量（单位 rpx），与 index.wxss 顶部注释里的同名常量一一对应。
-// 改用 flex 布局后，只有 TAB_H 还参与计算（算 FAB 的 bottom 偏移），
-// 其余保留是为了让 WXSS 里的固定高度有个单一说明来源。
-const LAYOUT = {
-  NAV_H: 88,
-  CATS_H: 88,
-  STATS_H: 112,
-  TAB_H: 120,
-  BOTTOM_H: 134,
-  // 拖动排序用：.row 的 margin-bottom，以及左滑面板的宽度
-  ROW_GAP: 16,
-  SWIPE_W: 240,     // 左滑面板：完成 / 删除 各 120rpx，两种视图一致
-  // 「拖到屏幕边缘、列表自己滚」用（单位 px，不是 rpx —— 这里比的是 clientY）：
-  // DRAG_EDGE = 距滚动区上下边多少像素算进入边缘区；AS_STEP / AS_TICK = 每拍滚多远、隔多久。
-  DRAG_EDGE: 96,
-  AS_STEP: 14,
-  AS_TICK: 40,
-};
+// 保持 callCloud(...) 的调用点原样。它在本文件里出现三十多次，
+// 逐个改成 cloud.callCloud 只会制造三十多处与行为无关的 diff。
+const callCloud = cloud.callCloud;
 
-// 排序用的稀疏步长：每次重排都写成 0 / 10 / 20…，留出插入空间也便于人工核对
-const ORDER_STEP = 10;
-// 一次重排最多提交多少条（云函数侧同样有上限）
-const REORDER_CAP = 200;
-
-// 云函数协议版本，必须与 cloudfunctions/fqTodo/index.js 的 FN_VER 相等。
-// 云函数新增/删除 action 时两边一起 +1，首屏握手就能发现「云端还是旧包」。
-// v3：引入共享家庭（归属键从 _openid 变成 fid），新增 sync / 家庭管理系列 action。
-// v4：分类支持删除与改名，新增 removeCategory / renameCategory。
-// v5：提醒推送，新增 grantSub（攒订阅额度）；保存带提醒的事项时顺手请求一次授权。
-const FN_VER = 5;
-// 握手弹窗只弹一次，别每次 load 都糊用户一脸
+// 握手弹窗只弹一次，别每次 load 都糊用户一脸。
+// 留在页面这一侧：它描述的是「本次页面会话已经提示过」，是一份会话状态，
+// 不是协议常量，所以不跟 FN_VER 一起搬进 utils/const.js。
 let fnVerWarned = false;
 
-// 自动同步的轮询间隔。页面可见时每 8 秒问一次「家庭数据变了没」，
-// 云函数只回一个 rev 数字，没变就是几十字节。
-// 为什么不用客户端 watch()：那要求把集合读权限放开给客户端，等于破掉
-// 「云函数是唯一数据出口」这条底线（见云函数头部铁律二）。两人用，轮询完全够。
-const SYNC_MS = 8000;
+/* ---------------- 事项进度 ---------------- */
 
-// 这些 action 会改数据。计数是为了让自动同步给它们让路 ——
-// 本地已经改完、页面也重绘了，但云端还没落库，这时如果同步把服务端快照拉回来覆盖，
-// 用户会看到自己刚点的那一下被弹回去（几秒后才自愈，属于最招人烦的那类抖动）。
-const WRITE_ACTIONS = [
-  'addItem', 'updateItem', 'removeItem', 'reorder', 'bulk', 'clearDone', 'clearAll',
-  'addCategory', 'removeCategory', 'renameCategory',
-  'genInvite', 'joinFamily', 'leaveFamily', 'renameMember', 'renameFamily',
-  // grantSub 也改云端状态（额度）。它不在数据快照里，但同样要占住
-  // pendingWrites —— 否则同步回来的 sub 会把这刚攒的那条盖回旧值。
-  'grantSub',
-];
-let pendingWrites = 0;
-
-const WEEK = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
-
-/* ---------------- 纯函数工具 ---------------- */
-
-function pad2(n) {
-  return n < 10 ? '0' + n : '' + n;
-}
-
-function todayStr() {
-  const d = new Date();
-  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
-}
-
-function todayMeta() {
-  const d = new Date();
-  return d.getMonth() + 1 + '月' + d.getDate() + '日 ' + WEEK[d.getDay()];
-}
-
-// 明天 09:00 / 今天 18:30 / 9月30日 09:00
-function remindText(ts) {
-  if (!ts) return '';
-  const d = new Date(ts);
-  const now = new Date();
-  const day0 = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const dayX = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-  const diff = Math.round((dayX - day0) / 86400000);
-  const hm = pad2(d.getHours()) + ':' + pad2(d.getMinutes());
-  if (diff === 0) return '今天 ' + hm;
-  if (diff === 1) return '明天 ' + hm;
-  if (diff === 2) return '后天 ' + hm;
-  if (diff === -1) return '昨天 ' + hm;
-  return d.getMonth() + 1 + '月' + d.getDate() + '日 ' + hm;
-}
-
-function remindDayShort(dateStr, timeStr) {
-  // dateStr: 'YYYY-MM-DD'
-  const p = String(dateStr).split('-');
-  const target = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
-  const now = new Date();
-  const day0 = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const diff = Math.round((target.getTime() - day0) / 86400000);
-  if (diff === 0) return '今天 ' + timeStr;
-  if (diff === 1) return '明天 ' + timeStr;
-  if (diff === 2) return '后天 ' + timeStr;
-  return Number(p[1]) + '月' + Number(p[2]) + '日 ' + timeStr;
-}
-
-// 手动拼 Date，避免 iOS 对 'YYYY-MM-DDTHH:mm' 解析不一致
-function toTimestamp(dateStr, timeStr) {
-  const dp = String(dateStr).split('-');
-  const tp = String(timeStr).split(':');
-  const y = Number(dp[0]);
-  const mo = Number(dp[1]) - 1;
-  const d = Number(dp[2]);
-  const h = Number(tp[0]);
-  const mi = Number(tp[1]);
-  if (!y || mo < 0 || !d) return null;
-  const out = new Date(y, mo, d, isNaN(h) ? 9 : h, isNaN(mi) ? 0 : mi, 0, 0);
-  return out.getTime();
-}
-
-/* ---------------- 云函数调用 ---------------- */
-
-// 邀请码归一化：大写、去空格与连字符。手抄来的码经常带空格或写成小写，
-// 与其让用户自己对齐格式，不如两边都归一（云函数侧有一份同样的 toCode）。
-function normCode(v) {
-  return String(v == null ? '' : v)
-    .toUpperCase()
-    .replace(/[\s-]/g, '')
-    .slice(0, 16);
-}
-
-// 邀请码入口那一行字：没生成 / 可复制 / 已过期。
-// 非创建者拿到的 inviteCode 是空串（云函数只把码回给创建者），
-// 所以这里天然只会给创建者出文案，不用再判一次身份。
-function inviteLabel(f) {
-  if (!f || !f.isOwner) return '';
-  if (f.inviteCode && Number(f.inviteExpire) > Date.now()) {
-    return '邀请码 ' + f.inviteCode + '（点击复制）';
+// 一条事项的进度（0~100 整数）的**唯一读法**。
+// 有 progress 就用它（夹紧 + 取整），没有就按 done 推 —— v7 之前入库的老数据
+// 没有这个字段，一条已完成的事项若显示 0%，「进度与完成是同一条状态线」
+// 这句话当场就破产了。
+// ⚠️ 两种来源必须在这里合流。散到各处写 `item.progress || (item.done ? 100 : 0)`，
+//    早晚有一处漏掉那个回退分支，而漏掉的那一处只会安静地显示错数字。
+function itemPct(it) {
+  const p = it && it.progress;
+  if (typeof p === 'number' && isFinite(p)) {
+    return Math.max(0, Math.min(100, Math.round(p)));
   }
-  if (f.inviteCode) return '邀请码已过期，点击重新生成';
-  return '生成邀请码';
-}
-
-function callCloud(action, payload) {
-  const isWrite = WRITE_ACTIONS.indexOf(action) >= 0;
-  if (isWrite) pendingWrites++;
-  // 成功失败都要减，否则一次网络异常会让自动同步永远让路（静默停摆，很难查）
-  function settle() {
-    if (isWrite && pendingWrites > 0) pendingWrites--;
-  }
-  return wx.cloud
-    .callFunction({
-      name: 'fqTodo',
-      data: Object.assign({ action: action }, payload || {}),
-    })
-    .then(function (res) {
-      const r = res && res.result;
-      if (!r || !r.ok) {
-        throw new Error((r && r.msg) || '操作失败');
-      }
-      return r.data;
-    })
-    .catch(function (err) {
-      const msg = (err && err.errMsg) || (err && err.message) || '网络异常';
-      if (msg.indexOf('FunctionName parameter could not be found') >= 0) {
-        throw new Error('云函数 fqTodo 尚未部署');
-      }
-      if (msg.indexOf('Environment not found') >= 0) {
-        throw new Error('云开发环境不存在，请检查 app.js 的 env');
-      }
-      // 云端回「未知 action」几乎只有一个成因：本地改了 action 清单、云函数没重新部署。
-      // 翻译成能照做的提示，原消息附在后面便于排查。
-      if (msg.indexOf('未知 action') >= 0) {
-        throw new Error('云函数版本过旧（' + msg + '），请重新上传部署 fqTodo');
-      }
-      throw new Error(err && err.message ? err.message : msg);
-    })
-    .then(
-      function (v) {
-        settle();
-        return v;
-      },
-      function (e) {
-        settle();
-        throw e;
-      }
-    );
+  return it && it.done ? 100 : 0;
 }
 
 /* ---------------- Page ---------------- */
 
-Page({
+const pageDef = {
   data: {
     // 布局
     ready: false,
     statusBarHeight: 20,
     capsuleReserve: 100,
     safeBottom: 0,
-    fabBottom: 80,
+    // 注：这里原本还有一个「悬浮按钮距底部多少 px」的键。按钮挪进矩阵容器、
+    //     改成常数偏移之后它就没有产生者了，一并删掉 —— 页面 data 只放视图模型。
+    //     （注释里故意不写那个键名：文本匹配式的检查会把它当成还在用。）
     // 视图
     view: 'overview',
     pageTitle: '四象限',
@@ -220,6 +96,22 @@ Page({
     catTabs: [],
     stats: [],
     grid: [],
+    // 今日饮水（本机存储，按日期各一条；跨天读到空 key 就等于清零）。
+    // 卡片在总览页矩阵之下，见 components/fq-water。
+    waterMl: 0,
+    waterGoal: WATER_GOAL,
+    // 日程（第 2 个 Tab）：月历选一天，写那天的计划，并列出那天有提醒的事项。
+    // 42 格日历、选中日期、两张计划卡、当天事项列表全部由 render() 现算
+    // （见 buildCal / buildPlan / buildSchedRows），这里只放视图模型。
+    calLabel: '',
+    calCells: [],
+    calAtToday: false,   // 选中的就是今天 → 「今天」按钮反色
+    schedDayLabel: '',
+    schedBadge: '',      // 「今天」那个小胶囊；不是今天就空串
+    schedCount: '',
+    planDay: { label: '今天要做什么', dateShort: '', text: '', placeholder: '还没写，点一下记一笔' },
+    planNext: { label: '明天准备做什么', dateShort: '', text: '', placeholder: '顺手把明天的重点记下来' },
+    schedRows: [],
     // 详情
     quad: 'q1',
     quadName: '',
@@ -286,6 +178,12 @@ Page({
     sheetTitle: '',
     sheetSub: '',
     sheetDone: false,   // 编辑一条已完成事项时，抽屉里多给一个「标记为未完成」
+    // 计划抽屉（sheetKind === 'plan'）：planDate 是正在改的那一天，
+    // planDraft 是输入框里的草稿（保存才落库，中途关掉不留痕）。
+    // planMax 直接读 const.js 的 PLAN_MAX，与云函数的 MAX_PLAN 成对 —— 不在 WXML 里写死数字。
+    planDate: '',
+    planDraft: '',
+    planMax: PLAN_MAX,
     qpicks: [],
     catPills: [],
     priPills: [],
@@ -309,11 +207,25 @@ Page({
   onLoad(options) {
     this.cats = [];   // 服务端分类镜像
     this.items = [];  // 服务端事项镜像
+    // 日程计划镜像：{ 'YYYY-MM-DD': '这一天要做什么' }，服务端下发后摊成一张表。
+    // 用表而不是数组：日历要按 42 个日期逐个问「这天写过计划吗」，
+    // 数组每次都得多扫一遍；而且查不到时天然给出 undefined，省掉「有没有这条」的分支。
+    this.plans = {};
     // 家庭信息与数据版本号。同样放内存镜像：syncTick 每 8 秒要用 rev 做一次比对，
     // 放 data 里会白白走一层 setData。
     this.fam = null;
     this.rev = 0;
-    this.state = { view: 'overview', catId: '', quad: 'q1', filt: 'all' };
+    // schedYm / schedDate 是日历的「看哪个月 / 选中哪天」，跟着视图状态一起放内存：
+    // 它们只在日程页用，放 data 里会让每次切 Tab 都多一轮无意义的 setData。
+    const todayD = todayStr();
+    this.state = {
+      view: 'overview',
+      catId: '',
+      quad: 'q1',
+      filt: 'all',
+      schedYm: ymOf(todayD),
+      schedDate: todayD,
+    };
     this._drag = null;        // 左滑手势状态
     this._dg = null;          // 拖动排序状态（量的行位置、起止下标）
     this._dgY0 = 0;
@@ -335,6 +247,12 @@ Page({
     // 订阅消息模板 id。由 bootstrap 下发，客户端**不硬编码一份** ——
     // 换模板时只要改云函数那一处，客户端跟着走。
     this.subTpl = '';
+
+    // 今日饮水：与云端无关，纯本机，首屏直接读出来。
+    // _waterDay 记住「当前显示的是哪一天的水」—— syncTick 每拍拿它和今天比一次，
+    // 跨零点就把量换掉（见 checkWaterDay）。
+    this._waterDay = todayStr();
+    this.loadWater();
 
     this.measure();
     this.load();
@@ -397,25 +315,16 @@ Page({
     this.statusBarHeight = statusBarHeight;
     this.safeBottom = safeBottom;
 
-    this.setData(
-      {
-        statusBarHeight: statusBarHeight,
-        capsuleReserve: Math.round(reserve),
-        safeBottom: safeBottom,
-      },
-      function () {
-        this.recalcFab();
-      }.bind(this)
-    );
-  },
-
-  /* 底部 tab / 主按钮靠 .screen 的纵向 flex 天然贴底，这里只算 FAB 的悬浮偏移。
-     早期版本还在这里算 scrollerH 并内联给 scroll-view，但 Android 的 screenHeight
-     含底部虚拟导航条，算出来偏大就会把 tabbar 顶出屏幕 ——
-     表现为「tab 不贴底 + 图标被压扁」，已改为 flex 布局。 */
-  recalcFab() {
+    // ⚠️ 这里**没有回调**：底部 tab / 主按钮靠 .screen 的纵向 flex 天然贴底，
+    //    悬浮按钮的偏移量在 fq-fab.wxss 里是个常数，都不需要测量结果。
+    //    早期版本在这里算 FAB 的 bottom（tab 高 + 安全区）并内联给组件，
+    //    更早还算过 scrollerH 内联给 scroll-view —— 但 Android 的 screenHeight
+    //    含底部虚拟导航条，算出来偏大就会把 tabbar 顶出屏幕 / 按钮压到饮水条上。
+    //    「靠 flex 分配 + 常数偏移」把这两个数都消掉了。
     this.setData({
-      fabBottom: Math.round((LAYOUT.TAB_H + 36) * this.rf + this.safeBottom),
+      statusBarHeight: statusBarHeight,
+      capsuleReserve: Math.round(reserve),
+      safeBottom: safeBottom,
     });
   },
 
@@ -427,6 +336,7 @@ Page({
       .then(function (data) {
         that.cats = data.categories || [];
         that.items = data.items || [];
+        that.adoptPlans(data.plans);
         that.adoptFamily(data.family);
         that.adoptSub(data.sub);
         // 换了家庭（刚加入 / 刚退出）之后，原来选中的分类在新家里根本不存在，
@@ -469,6 +379,23 @@ Page({
       subQuota: Math.max(0, Number(s.quota) || 0),
       subMissed: Math.max(0, Number(s.missed) || 0),
     });
+  },
+
+  // 服务端下发的日程计划 → 一张「日期 → 文本」的表。
+  // 整表重建而不是逐条合并：云端就是权威快照，某天被清空（记录被删掉）
+  // 时，只有重建才能让它跟着消失 —— 增量合并会留下一条永远删不掉的幽灵。
+  // 服务端没回这个字段（旧版云函数）就原样保留现状，别把用户写的计划擦掉。
+  adoptPlans(list) {
+    // ⚠️ 用 Array.isArray 而不是 `if (!list)`：云函数下发的是**数组**
+    // （`plansFor()` 里 map 成 `{date, text}`）。哪天回了个对象而不是数组，
+    // `!list` 拦不住，紧接着的 `list.forEach` 会直接抛 —— 首屏白屏。
+    // 判成「不是数组就当作旧版云函数没给」是唯一不会炸的读法。
+    if (!Array.isArray(list)) return;
+    const m = {};
+    list.forEach(function (p) {
+      if (p && p.date) m[p.date] = p.text || '';
+    });
+    this.plans = m;
   },
 
   /* 请求一次订阅授权，用户点了「允许」才回来记账。
@@ -531,6 +458,60 @@ Page({
     this.doJoin(code, true);
   },
 
+  /* ================= 今日饮水 =================
+     只存本机（wx.setStorageSync），按日期各存一条：
+         fq_water_2026-10-09 -> 1200
+     于是「每天零点清零」不需要任何定时任务 —— 跨天读到的就是一个空 key。
+     为什么不进云函数：饮水是个人身体指标，没有全家共享的意义，
+     而且它完全离线就能成立，没必要为它占一个 action、抬一次 FN_VER。
+
+     旧日期的 key 不做清理：一天几十字节，留着还能做「最近几天喝了多少」。
+     真要做历史曲线时，这里是唯一需要改的地方。 */
+
+  waterKey() {
+    return WATER_KEY + todayStr();
+  },
+
+  // 读出今天的量。首次进入与跨天都走这里。
+  loadWater() {
+    let ml = 0;
+    try {
+      ml = Number(wx.getStorageSync(this.waterKey())) || 0;
+    } catch (e) {
+      // 读失败当 0：不因为一条本地记录把首屏打断。
+    }
+    ml = Math.max(0, Math.min(WATER_GOAL, ml));
+    if (ml !== this.data.waterMl) this.setData({ waterMl: ml });
+  },
+
+  // 组件松手时回调（见 components/fq-water）。值已按目标夹紧，这里再夹一次兜底。
+  onWaterChange(e) {
+    const ml = Math.max(0, Math.min(WATER_GOAL, Number(e.detail && e.detail.ml) || 0));
+    this.setData({ waterMl: ml });
+    try {
+      wx.setStorageSync(this.waterKey(), ml);
+    } catch (e2) {
+      // 写失败不回滚界面：今天喝到多少本来就以用户拖到的为准；
+      // 下次进来读不到旧值也只是回到 0，不会串到别的日期上去。
+    }
+  },
+
+  // 跨零点：页面一直开着时，靠轮询的节拍把「今天」换掉。
+  // 不单开定时器 —— 页面可见时 syncTick 本来就在跑，页面不可见时也不该刷新
+  // （用户看不到，白费一次 setData）。 */
+  checkWaterDay() {
+    const d = todayStr();
+    if (d === this._waterDay) return;
+    this._waterDay = d;
+    this.loadWater();
+    // 顺带把日程页的「今天」也推一次：日历上的今天圈、两张计划卡的
+    // 「今天 / 明天」文案、当天事项列表，全是渲染时按当前日期现算的，
+    // 不重绘就还停在昨天。
+    // ⚠️ 选中的日期**故意不动** —— 用户正盯着某一天看，
+    //    系统在零点把他选的日子换掉，比让他自己点一下「今天」更糟。
+    if (this.data.ready && this.state.view === 'sched') this.render();
+  },
+
   /* ================= 自动同步 =================
      共享清单的核心体验是「家人改了，我这边不用手动刷」。
      做法是轮询：每 SYNC_MS 带着本地 rev 问一次云函数，没变就只回一个数字。
@@ -556,16 +537,21 @@ Page({
   },
 
   syncTick() {
+    // 跨零点检查放在最前：它不该被下面那三个让路条件挡掉 ——
+    // 那三条说的是「先别拉云端数据」，和本机日期无关。
+    this.checkWaterDay();
     if (!this.data.ready) return;
     // 三种情况下不拉：还没首屏、正在拖排序、本地还有没落库的写。
     // 后两种会把用户手上的操作冲掉（乐观更新被服务端快照覆盖，看着像「点不动」）。
-    if (this.data.sortMode || pendingWrites > 0 || this.data.sheetOpen) return;
+    // 写计数问 services/cloud.js 要 —— 记账钉在唯一的云出口上，这里只读。
+    if (this.data.sortMode || cloud.pendingWriteCount() > 0 || this.data.sheetOpen) return;
     const that = this;
     callCloud('sync', { rev: this.rev })
       .then(function (data) {
         if (!data || !data.changed) return;
         that.cats = data.categories || [];
         that.items = data.items || [];
+        that.adoptPlans(data.plans);
         that.adoptFamily(data.family);
         that.adoptSub(data.sub);
         that.fixCatId();
@@ -669,6 +655,13 @@ Page({
       _id: it._id,
       q: it.quad,
       done: !!it.done,
+      // 进度条读数。它和 done 是同一条状态线的两种读法，落库后必然一致
+      // （耦合在云函数 updateItem 里，见那边的注释）。拖动期间这一对会被
+      // paintProgress 用路径 setData 单独改写，不走这个函数。
+      pct: itemPct(it),
+      // 「这一条正被按住拖」——只驱动进度条那个抓取反馈（轨道加深 + 圆点放大）。
+      // 走行内路径 setData 单独改写，和 pct 一样不走 render()。
+      pgOn: false,
       title: it.title,
       note: it.note || '',
       priLabel: 'P' + it.priority,
@@ -807,6 +800,113 @@ Page({
     return out;
   },
 
+  /* ---------------- 日程 ---------------- */
+
+  // 日历表头那行：'2026 年 10 月'
+  buildCalLabel() {
+    return monthLabel(this.state.schedYm);
+  },
+
+  // 「这一天有事项」的日期表。
+  // ⚠️ 口径与下面 buildSchedRows 的「这天的事项」**完全一致**（都是
+  //    「有提醒时间且落在那一天」）—— 日历上的圆点和点进去看到的列表
+  //    必须是同一件事，否则会出现「有圆点但列表是空的」这种没人解释得通的状态。
+  // 为什么不看完成态：完成的条目也仍然算「那天有过安排」，圆点讲的是
+  // 「那天有没有内容」，不是「那天还剩多少活」。
+  itemDays() {
+    const map = {};
+    this.items.forEach(function (it) {
+      if (!it.remindAt) return;
+      const k = dayKey(it.remindAt);
+      if (k) map[k] = true;
+    });
+    return map;
+  },
+
+  // 42 个格子。
+  // 起点取「当月 1 号所在那一周的周一」，然后**连排 42 天** ——
+  // 于是上月补格、下月补格、闰年、跨年全都不用单独判：它就是一段连续的日子。
+  // （getDay() 里 0 是周日，要拿周一当第一列，就得把周日挪到末尾：(0+6)%7 = 6。）
+  buildCal() {
+    const ym = this.state.schedYm;
+    const y = Number(ym.slice(0, 4));
+    const m = Number(ym.slice(5, 7));
+    const lead = (new Date(y, m - 1, 1).getDay() + 6) % 7;
+
+    const today = todayStr();
+    const sel = this.state.schedDate;
+    const hasItem = this.itemDays();
+    const plans = this.plans;
+
+    const out = [];
+    for (let i = 0; i < CAL_CELLS; i++) {
+      // 用 Date 自己进位：1 - lead + i 可能是 0 或负数（上月）、也可能 > 当月天数
+      const d = new Date(y, m - 1, 1 - lead + i);
+      const k = d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+      out.push({
+        k: k,
+        n: d.getDate(),
+        other: d.getMonth() !== m - 1,
+        today: k === today,
+        sel: k === sel,
+        hi: !!hasItem[k],
+        hp: !!plans[k],
+      });
+    }
+    return out;
+  },
+
+  // 一张计划卡。which: 0 = 这一天，1 = 次日。
+  // ⚠️ `date` 永远是**页面正在看的那一天**（即 schedDate），次日由这里自己算 ——
+  //    别让调用方把「次日」提前算好再传进来：那样 `planLabels(...)[which]` 会在
+  //    已经前进过一天的基准上再前进一天，第二张卡的标题整整说错一天
+  //    （选中今天，卡上写「后天准备做什么」，而它记的其实是明天）。
+  //    标题随差值变（见 format.js 的 planLabels），不能写死「今天 / 明天」。
+  buildPlan(date, which) {
+    const d = which ? addDays(date, 1) : date;
+    return {
+      label: planLabels(dayDiff(date))[which],
+      dateShort: mdShort(d),
+      text: this.plans[d] || '',
+      // 占位文案跟着「这张卡指的是哪一天」走：选中昨天时第二张卡是
+      // 「今天要做什么」，写死「顺手把明天的重点记下来」就自相矛盾了。
+      placeholder:
+        which === 0
+          ? '还没写，点一下记一笔'
+          : '顺手把' + dayWord(dayDiff(date) + which) + '的重点记下来',
+    };
+  },
+
+  // 「这天的事项」：提醒时间落在那一天的事项。
+  // ⚠️ 口径是「那天的提醒」，不是「那天的排期」—— fq_items 里没有日期字段，
+  //    只有 remindAt。所以这一段的语义照实写，不假装它是排期表。
+  //    等哪天真的给事项加上 dueDate，改的是这一个函数 + 日历的圆点口径。
+  // 不受当前分类筛选影响：日程是跨分类的「时间视图」，
+  // 分类筛选属于总览/详情那条线（见 memory 里「矩阵管哪一格、日程管哪一天」）。
+  buildSchedRows() {
+    const date = this.state.schedDate;
+    const out = [];
+    this.items.forEach(function (it) {
+      if (!it.remindAt) return;
+      if (dayKey(it.remindAt) !== date) return;
+      out.push({
+        _id: it._id,
+        q: it.quad,
+        title: it.title,
+        done: !!it.done,
+        ts: it.remindAt,
+        // 右槽：未完成给具体时刻，已完成给状态 —— 两者都是「这一条现在怎么样」
+        tail: it.done ? '已完成' : hhmm(it.remindAt),
+      });
+    });
+    // 未完成在前，同状态按时刻先后。与详情页「待办在前」的读法一致。
+    out.sort(function (a, b) {
+      if (a.done !== b.done) return a.done ? 1 : -1;
+      return a.ts - b.ts;
+    });
+    return out;
+  },
+
   /* ================= 渲染 ================= */
 
   render() {
@@ -834,6 +934,34 @@ Page({
       patch.filters = this.buildFilters();
       patch.filt = this.state.filt;
       patch.rows = this.buildRows();
+    } else if (v === 'sched') {
+      const date = this.state.schedDate;
+      const diff = dayDiff(date);
+      const rows = this.buildSchedRows();
+      let undone = 0;
+      rows.forEach(function (r) {
+        if (!r.done) undone++;
+      });
+      patch.calLabel = this.buildCalLabel();
+      patch.calCells = this.buildCal();
+      patch.calAtToday = diff === 0;
+      patch.schedDayLabel = dateCN(date);
+      patch.schedBadge = diff === 0 ? '今天' : '';
+      if (!rows.length) patch.schedCount = '无待办';
+      else if (undone) patch.schedCount = undone + ' 项待办';
+      else patch.schedCount = '都已完成';
+      patch.planDay = this.buildPlan(date, 0);
+      // ⚠️ 传的就是 date（选中日），不是 addDays(date,1)：见 buildPlan 里的说明 ——
+      //    提前算好次日会让标题在已经前进一天的基准上再前进一天。
+      patch.planNext = this.buildPlan(date, 1);
+      patch.schedRows = rows;
+      patch.pageTitle = '日程';
+      // ⚠️ 顶部这行小标题**固定是今天**，不跟选中日走（点下个月 15 号它也不变）。
+      //    它和下面 .dayh 那行分工不同：.dayh 回答「我现在在看哪一天」，
+      //    这一行回答「今天是几号」—— 页面级的参照。
+      //    两行都跟着点日历变的话，屏幕上就没有任何一处能告诉你日历上那个
+      //    描边圈（今天）到底是几号了。
+      patch.pageMeta = dateCN(todayStr());
     } else if (v === 'all') {
       patch.sections = this.buildSections();
       patch.pageTitle = '全部事项';
@@ -874,6 +1002,9 @@ Page({
     patch.dragY = 0;
     patch.dragOn = false;
     patch.dropQuad = '';
+    // 进度条手势不跨重绘存活：render() 之后行对象可能是新的，
+    // 手里那份 `_pg.rect` 已经指不到屏幕上的东西了。
+    this._pg = null;
 
     this.applyStatusBarText();
     // FAB 的偏移只跟 tab 高度和安全区有关，与当前视图无关，不必每次渲染重算
@@ -910,7 +1041,12 @@ Page({
   /* ================= 交互：视图切换 ================= */
 
   onTab(e) {
-    const key = e.currentTarget.dataset.k;
+    // 这个 handler 只由组件 fq-tabbar 触发（页面上没有别的调用点），
+    // 取值走 e.detail —— 组件把被点 tab 的 dataset 原样塞进了 detail
+    // （见 components/fq-tabbar/fq-tabbar.js）。原先是页面自己的元素上带
+    // data-k、直接读 e.currentTarget.dataset，搬进组件后那条路就不通了：
+    // 组件标签上没有 data-k，读出来是 undefined，会把 state.view 设成 undefined。
+    const key = e.detail.k;
     if (key === this.state.view) return;
     this.state.view = key;
     this.state.filt = 'all';
@@ -919,7 +1055,9 @@ Page({
   },
 
   onOpenQuad(e) {
-    this.state.quad = e.currentTarget.dataset.k;
+    // 只由组件 fq-quad 触发（页面上没有别的调用点），取值走 e.detail ——
+    // 组件把被点象限的 dataset 原样塞进了 detail。
+    this.state.quad = e.detail.k;
     this.state.filt = 'all';
     this.state.view = 'detail';
     this.exitSort();
@@ -932,14 +1070,111 @@ Page({
     this.render();
   },
 
+  /* ================= 交互：日程 ================= */
+
+  // 翻月。选中的那天如果不在新月份里，就落到新月份的 1 号 ——
+  // 否则会出现「网格里一个选中格都没有，下面两张卡却在讲另一天」的脱节。
+  shiftMonth(n) {
+    const ym = this.state.schedYm;
+    // 交给 Date 进位，省掉手写「12 月 +1 = 次年 1 月」这类边界
+    const d = new Date(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)) - 1 + n, 1);
+    const next = d.getFullYear() + '-' + pad2(d.getMonth() + 1);
+    this.state.schedYm = next;
+    if (ymOf(this.state.schedDate) !== next) this.state.schedDate = next + '-01';
+    this.render();
+  },
+
+  onCalPrev() {
+    this.shiftMonth(-1);
+  },
+
+  onCalNext() {
+    this.shiftMonth(1);
+  },
+
+  onCalToday() {
+    const t = todayStr();
+    this.state.schedDate = t;
+    this.state.schedYm = ymOf(t);
+    this.render();
+  },
+
+  onCalPick(e) {
+    // 只由组件 fq-cal 触发（页面里没有别的调用点），取值走 e.detail ——
+    // 组件把被点那格的 dataset 原样交给了 detail（见 components/fq-cal/fq-cal.js）。
+    const k = e.detail && e.detail.k;
+    if (!k) return;
+    this.state.schedDate = k;
+    // 点到上/下月的补格时，把显示的月份也跟过去 —— 否则那只是网格边缘上的
+    // 一个数，用户以为点不动。
+    this.state.schedYm = ymOf(k);
+    this.render();
+  },
+
+  // 「这天的事项」里点一行 → 直接进那条事项的编辑抽屉。
+  // 复用 openForm，不另开一条入口（左滑、卡片点击走的都是它）。
+  onSchedRow(e) {
+    const it = this.findItem(e.currentTarget.dataset.id);
+    if (it) this.openForm(it);
+  },
+
+  // 点计划卡 → 打开抽屉写「这一天 / 次日」的计划。
+  // which 由组件 fq-plan 通过 e.detail.kind 给出（'day' | 'next'）。
+  // 注意页面内部没有第二个调用点，两条路都从这里算日期，
+  // 「次日」永远是相对**选中日**而不是相对今天。
+  onPlanEdit(e) {
+    const date =
+      (e.detail && e.detail.kind) === 'next'
+        ? addDays(this.state.schedDate, 1)
+        : this.state.schedDate;
+    this.setData({
+      sheetOpen: true,
+      sheetKind: 'plan',
+      sheetTitle: planLabels(dayDiff(date))[0],
+      sheetSub: dateCN(date),
+      planDate: date,
+      planDraft: this.plans[date] || '',
+    });
+  },
+
+  onInputPlan(e) {
+    this.setData({ planDraft: e.detail.value });
+  },
+
+  // 保存计划。**空文本 = 删掉这一天的计划**（云函数 savePlan 是同一套语义），
+  // 所以不需要再给一个「删除」按钮：清空再保存就是删除。
+  onSavePlan() {
+    const date = this.data.planDate;
+    if (!date) return;
+    // 再切一次长度兜底：textarea 的 maxlength 是客户端限制，
+    // 云函数那边还有一道 MAX_PLAN（两道都要有，前端拦不住手动构造的请求）。
+    const text = String(this.data.planDraft || '').slice(0, PLAN_MAX);
+    this.closeSheet();
+    const that = this;
+    this.commit(
+      function () {
+        if (text) that.plans[date] = text;
+        else delete that.plans[date];
+      },
+      callCloud('savePlan', { date: date, text: text })
+    );
+  },
+
   onFilter(e) {
     if (this.data.sortMode) return; // 排序模式下筛选被锁
-    this.state.filt = e.currentTarget.dataset.k;
+    // 只由组件 fq-filters 触发，取值走 e.detail。
+    this.state.filt = e.detail.k;
     this.render();
   },
 
   onPickCat(e) {
-    this.state.catId = e.currentTarget.dataset.k;
+    // ⚠️ 这个 handler 有**两个来源**，取值方式不同：
+    //   ① 组件 fq-cats（总览的分类胶囊）→ triggerEvent 把被点元素的 dataset
+    //      放进 e.detail，所以读 e.detail.k；
+    //   ② 页面自己的分类行（「我的」页）→ 仍然是原生事件，读 currentTarget.dataset。
+    //   两处共用一个 handler（逻辑一致，没必要分两份），所以两边都认一下。
+    const k = e.detail && e.detail.k !== undefined ? e.detail.k : e.currentTarget.dataset.k;
+    this.state.catId = k;
     this.render();
   },
 
@@ -949,68 +1184,16 @@ Page({
     this.render();
   },
 
-  /* ================= 交互：排序模式 =================
-     为什么要有独立的排序模式（而不是长按直接拖）：
-     长按可以把手势分开，但没有任何视觉提示，新用户发现不了；
-     「整屏按下即拖」则更糟 —— 列表再也滚不动了（拖动和滚动抢同一串 touchmove）。
-     折中方案 = 显式的模式开关 + 卡片右侧的拖动手柄：
-     点「调整顺序」进入，期间**只有手柄**能拖卡片，卡片其余区域照常滚列表；
-     底部换成固定的「完成」条，随时可退出。
-     （早期版本是把 scroll-y 关掉来避免冲突，代价是排序模式完全不能滚；
-       现在把两种手势分派到不同元素上，两个都要。） */
+  /* ================= 交互：排序模式 / 拖动排序 =================
+     这一整块搬去了 utils/drag.js：
+       排序模式开关（onSortToggle / exitSort）、拖动手柄（onHandle*）、
+       滚动同步（onScrollerScroll）、拖动状态机（startDrag 起）、
+       行位置测量、拖到边缘自动滚、松手落库（commitOrder）。
+     它是全项目最长的一段状态机（约 450 行），且只跟 this.data 与 this._*
+     打交道，正好可以整块独立出来 review。文件末尾 Object.assign 回页面。
 
-  onSortToggle() {
-    const next = !this.data.sortMode;
-    // 切换模式时把可能存在的拖动状态一起丢掉：留着 _dg 就是一个「僵尸拖动」，
-    // 之后的每一次 touchmove 都会被 applyDragMove 吃掉（见 startDrag 的说明）。
-    this._dg = null;
-    this._drag = null;
-    this.stopAutoScroll();
-    if (next) {
-      // 进入排序模式的反馈：一次轻震动 + 卡片整体抖一下（.row.pulse 的动画）。
-      // 抖动只在「点调整顺序」这一下发生，拖动过程中不抖。
-      try {
-        wx.vibrateShort({ type: 'light', fail() {} });
-      } catch (e) {
-        /* 部分端不支持柔和震动，忽略 */
-      }
-    }
-    this.setData({
-      sortMode: next,
-      sortPulse: next,
-      swipeKey: '',
-      swipeX: 0,
-      dragId: '',
-      dragY: 0,
-      dragOn: false,
-      dropQuad: '',
-    });
-    // 抖动是一次性的：动画放完就把标记摘掉，否则后面任何一次 re-render
-    // 都可能让这个 class 重新参与 diff，动画又放一遍。
-    if (this._pulseT) {
-      clearTimeout(this._pulseT);
-      this._pulseT = null;
-    }
-    if (next) {
-      const that = this;
-      this._pulseT = setTimeout(function () {
-        that._pulseT = null;
-        if (that.data.sortPulse) that.setData({ sortPulse: false });
-      }, 380);
-    }
-  },
-
-  // 注意：render() 里不重置 sortMode —— 拖动结束会走 commitOrder → render()，
-  // 若在那里重置，每拖一次就会被踢出排序模式。
-  exitSort() {
-    // 切视图时把拖动状态一并清掉。只把 sortMode 置假是不够的：
-    // 万一量行位置的回调还在路上，它会补上一个 _dg —— 也就是僵尸拖动，
-    // 之后每一次纵向手势都会被 applyDragMove 吃掉，用过期坐标重排整个列表。
-    this._dg = null;
-    this._drag = null;
-    this.stopAutoScroll();
-    if (this.data.sortMode) this.setData({ sortMode: false });
-  },
+     留在本文件里的是三种手势**共用的入口** onRowStart / onRowMove / onRowEnd：
+     它们同时服务左滑、拖动、滚动，属于事件编排，不是拖动引擎。 */
 
   /* ================= 交互：滑动与卡片 ================= */
 
@@ -1042,6 +1225,10 @@ Page({
     //
     // 新一次手势开始，把上一轮的「量行位置在途」标记清掉，否则第二次拖动会被它挡住。
     this._dgP = null;
+    // 同理清掉进度条手势。正常路径走不到这里（`.prog` 用 catchtouchstart
+    // 截住了自己的手势，卡片这一层根本收不到），留着是防止某次中断
+    // （touchend 丢失）把 `_pg` 遗传给下一次手势。
+    this._pg = null;
   },
 
   onRowMove(e) {
@@ -1123,460 +1310,8 @@ Page({
     });
   },
 
-  /* ---- 拖动手柄：把「拖」从「滚」里摘出来 ----
-     历史：排序模式一度把 scroll-y 关掉，理由是「卡片整块都能拖，拖动和滚动
-     抢同一串 touchmove，同时开着就会一边滚一边重排卡片」—— 判断没错，
-     但因此牺牲了排序模式下的滚动，长列表里够不着目标位置。
+  /* 拖动手柄 / 滚动同步 / 拖动引擎 → utils/drag.js（文件末尾合并进来） */
 
-     现在拖动只认这个手柄：它 catch 掉 touch 事件，scroll-view 根本收不到，
-     卡片其余区域照常把手势交给列表。两种手势不再抢同一个事件，也就不用再关滚动。
-
-     三个 handler 直接复用行手势的实现，只在 _drag 上打一个 handle 标记，
-     由 onRowMove 决定「这次算不算拖动」—— 这样左滑、拖动、长列表滚动
-     仍然只有一份状态机，不会分叉。 */
-
-  onHandleStart(e) {
-    this.onRowStart(e);
-    if (this._drag) this._drag.handle = true;
-  },
-
-  onHandleMove(e) {
-    this.onRowMove(e);
-  },
-
-  onHandleEnd() {
-    this.onRowEnd();
-  },
-
-  /* ---- 滚动同步 ----
-     拖动期间「行在屏幕上的位置」必须跟着滚动走，否则换位判定会拿过期坐标
-     算出错的落点。这里只做一件事：把 bindscroll 报来的真实滚动量
-     折算到 _dg.rects 上，然后按最新位置重算一次落点。
-
-     刻意不在这里 setData —— 滚动事件很密，每次都推视图层会把列表拖垮。
-     真正要重绘时（落点变了 / 位移变了）由 applyDragMove 决定。 */
-
-  onScrollerScroll(e) {
-    const st = Number((e && e.detail && e.detail.scrollTop) || 0);
-    const prev = this._scrollTop;
-    this._scrollTop = st;
-
-    const dg = this._dg;
-    if (!dg || prev === st) return;
-    const d = st - prev;
-    dg.rects.forEach(function (r) {
-      r.top -= d;
-    });
-    // 手指没动、列表动了：落点可能已经变了，按新位置重算一遍
-    if (dg.lastY != null) this.applyDragMove(dg.lastY);
-  },
-
-  /* ================= 交互：拖动排序 =================
-     触发方式：排序模式下按住卡片**右侧的手柄**（.dh）拖动。
-     为什么必须是手柄：拖动与滚动都是纵向手势，让它们落在同一个元素上就必然互斥
-     （要么拖不了，要么滚不了）。手柄用 catch 把事件从滚动区手里截走，
-     一张卡片于是有了两块互不干扰的区域：手柄负责拖，其余区域负责滚。
-
-     实现要点：
-     1. 行位置在拿起时用 boundingClientRect 量一次，之后不再查询；
-        列表滚动时按 bindscroll 报来的真实滚动量整体平移这份快照 ——
-        拖动期间布局没变，每帧重新查询纯属浪费。
-     2. 位移分两条通道推给视图层：dragY（被拖的卡片，每帧变）和
-        shift（其余卡片的让位量，只在跨过某行中线时才变）。
-        这样高频的 touchmove 只 setData 一个数字，与左滑同一套思路。
-     3. 卡片在屏幕上的位置 = 拿起时的位置 + 手指位移，
-        不直接累加 clientY —— 列表一滚，后者的基准就漂了。
-     4. 手指贴到滚动区上下缘时列表自动滚（runAutoScroll），
-        否则长列表里根本够不着屏幕外的落点。 */
-
-  // clientY = 拿起那一刻的纵坐标，作为位移原点（拿起点位移恒为 0）
-  startDrag(id, clientY) {
-    if (!id || this._dg) return;
-    // ⚠️ 第二道闸：正在量行位置时，拒绝重来。
-    //    measureRows 要过渲染层一个来回（十几到几十毫秒），这段时间里 _dg 还是空的，
-    //    于是 onRowMove 会在**每一个 touchmove** 上再喊一次 startDrag：
-    //      · _dragSeq 被反复自增 → 在途的回调全部对不上号，被当「迟到的僵尸回调」丢掉；
-    //      · dragY 被反复压回 0，_dgY0 被反复改写。
-    //    手指一直在动、touchmove 不停，回调就永远等不到落地 —— 表现正是
-    //    「按住拖不动，得停下来缓一下、试好几次才拿得起卡片」。
-    //    拿到 _dg 之前只认第一次，后面的一律忽略。
-    if (this._dgP) return;
-    this._dgP = id;
-    if (this.data.swipeKey) this.setData({ swipeKey: '', swipeX: 0 });
-    this._dgY0 = clientY;
-    // dragOn 只是「拖动中」的内部标记，不控制列表滚动 —— scroll-y 现在常开，
-    // 「拖」与「滚」靠手柄分流（手柄 catch 掉事件），不再靠关滚动。
-    // 这里刻意不做震动/抖动：反馈统一放在「点调整顺序」那一刻（见 onSortToggle），
-    // 拿起卡片已经有抬起阴影 + 跟手位移，够了。
-    this.setData({ dragOn: true, dragId: id, dragY: 0, dropQuad: '' });
-    // 量一次滚动区上下边（边缘自动滚要用）。异步、不阻塞拖动本身：
-    // 量回来之前手指若已经离开边缘，maybeAutoScroll 自然也不会滚。
-    this.measureScroller();
-
-    const that = this;
-    // 惰性自增：不依赖 onLoad 一定跑过（仿真测试里就用 Object.create 造页面）
-    const seq = (this._dragSeq = (this._dragSeq || 0) + 1);
-    this.measureRows(function (rects) {
-      // ⚠️ 量行位置是异步的，回调回来时这一次拖动可能早就结束了：
-      //    手指点一下就抬走、中途切了视图、或者已经开始了新的一次拖动。
-      //    早先这里**无条件**写入 _dg，于是留下一个「僵尸拖动」——
-      //    此后每一次 touchmove（包括正常滚动列表）都会被 applyDragMove 接管，
-      //    拿过期坐标算出错的让位位移，把整个列表重排一遍。
-      //    用户看到的就是「滑动时卡片乱跳、滑到的块都消失了」。
-      //    三道闸一起关：代号没变 + 仍在拖动中 + 拖的还是同一行。
-      if (seq !== that._dragSeq || !that.data.dragOn || that.data.dragId !== id) return;
-
-      const ok = rects.length >= 2;
-      const flat = ok ? that.flatList() : [];
-      let from = -1;
-      for (let i = 0; i < flat.length; i++) {
-        if (flat[i].id === id) { from = i; break; }
-      }
-      // 量到的行数应与视图模型一一对应；对不上就放弃这次拖动，宁可不做也不做错
-      if (!ok || from < 0 || flat.length !== rects.length) {
-        // 放开闸：这次没量成（多半是量的时候列表正在重排），让后续 touchmove
-        // 还有机会重量一次。不放开的话，一次瞬时错位会让整串手势彻底废掉。
-        that._dgP = null;
-        that.setData({ dragOn: false, dragId: '', dragY: 0 });
-        return;
-      }
-      // 闸的使命到这就结束了：状态机马上装上，之后由 _dg 自己挡重复调用。
-      // 不放开的话，万一将来有哪条收尾路径漏了清理，下一轮手势会被一直挡住。
-      that._dgP = null;
-      that._dg = {
-        id: id,
-        from: from,
-        to: from,
-        rects: rects,
-        flat: flat,
-        dy: 0,
-        // 已经推给视图层的 dragY（量化后的整数 px）。高频通道靠它去重，
-        // 见 applyDragMove —— 同一像素内的重复推送会被它吃掉。
-        pushedY: 0,
-        // 拿起那一刻卡片顶边在屏幕上的位置。之后列表不管怎么滚，
-        // 「卡片该在哪」都由它 + 手指位移算出，不必再单独补偿滚动量 ——
-        // 列表滚多远，rects[from].top 就跟着走多远，两边自动抵消。
-        base0: rects[from].top,
-        lastY: clientY,
-        scrollDir: 0,     // 手指是否停在上下边缘（-1 上 / 0 否 / 1 下）
-        asPending: null,  // 自动滚一拍的目标，用来判断「滚到底了没有」
-        asDirDone: 0,     // 已经滚到头的方向，别对着墙反复 setData
-      };
-    });
-  },
-
-  // 屏幕左上角为原点的行位置（只含 top / height，都够用）
-  measureRows(cb) {
-    const q = wx.createSelectorQuery();
-    q.selectAll('.row').boundingClientRect();
-    q.exec(function (res) {
-      const arr = (res && res[0]) || [];
-      cb(
-        arr
-          .filter(function (r) {
-            return r && r.height > 0;
-          })
-          .map(function (r) {
-            return { top: r.top, height: r.height };
-          })
-      );
-    });
-  },
-
-  // 滚动区在屏幕上的上下边（「拖到边缘自动滚」要用）。
-  // 它只跟屏幕尺寸和固定头部的高度有关，列表怎么滚都不变，所以量一次就够。
-  // 量不到就置空：那时不自动滚，拖动本身一切照旧 —— 不做降级就会连拖动一起废掉。
-  measureScroller() {
-    const that = this;
-    const q = wx.createSelectorQuery();
-    q.select('.scroller').boundingClientRect();
-    q.exec(function (res) {
-      const r = res && res[0];
-      if (!r || !(r.height > 0)) {
-        that._scBand = null;
-        return;
-      }
-      that._scBand = { top: r.top, bottom: r.top + r.height };
-    });
-  },
-
-  // 渲染顺序的扁平快照，用于把「第几个 .row」翻译成「哪条事项 / 哪个象限」。
-  // 必须与 WXML 的渲染顺序一致：详情页 = rows 顺序；全部页 = 分段顺序展开。
-  flatList() {
-    const out = [];
-    if (this.state.view === 'detail') {
-      this.data.rows.forEach(function (r, i) {
-        out.push({ id: r._id, quad: r.q, sec: 0, idx: i });
-      });
-    } else {
-      this.data.sections.forEach(function (sec, si) {
-        sec.rows.forEach(function (r, ri) {
-          out.push({ id: r._id, quad: sec.key, sec: si, idx: ri });
-        });
-      });
-    }
-    return out;
-  },
-
-  applyDragMove(clientY) {
-    const dg = this._dg;
-    if (!dg) return;
-    const rects = dg.rects;
-    const from = dg.from;
-    const n = rects.length;
-    const base = rects[from];
-
-    dg.lastY = clientY;
-
-    // 位移夹在列表首尾之间，卡片不会被拖出列表范围。
-    // minDy / maxDy 只描述「首尾相对被拖卡片」的关系：列表整体滚动时两者一起位移，
-    // 差值是常量，所以它们不随滚动变化 —— 滚过之后依然有效。
-    const minDy = rects[0].top - base.top;
-    const maxDy = rects[n - 1].top + rects[n - 1].height - (base.top + base.height);
-
-    // ⚠️ 位移原点不能简单写成 clientY - _dgY0。
-    //    卡片靠 translateY 相对「自己那一行的当前位置」定位，而那一行会随列表滚动。
-    //    所以先算出它**该在屏幕上的位置**（拿起时的顶边 base0 + 手指位移），
-    //    再减去它当前的位置，才是要推给视图层的 dy。
-    //    列表没滚时 base.top === base0，正好退化成原来的 clientY - _dgY0。
-    let dy = dg.base0 + (clientY - this._dgY0) - base.top;
-    if (dy < minDy) dy = minDy;
-    if (dy > maxDy) dy = maxDy;
-
-    // ⚠️ 位移先量化成整数 px，再参与判定与渲染。
-    //    touchmove 在真机上能到 60~120Hz，而 dragY 出现在**每一行**的 style 表达式里：
-    //    每 setData 一次，整个列表的样式都要重算一遍。亚像素的位移屏幕上根本看不出来，
-    //    却会让每一帧都被判成「变了」而重复推送 —— 这是拖动卡顿的主因。
-    //    量化到整数格之后，下面那条去重就能把「同一像素内的连续 touchmove」全吃掉。
-    const dyPx = Math.round(dy);
-
-    // 手指停在滚动区上下缘 → 让列表自己滚（长列表里才够得着屏幕外的落点）
-    this.maybeAutoScroll(clientY);
-
-    // 换位判定：卡片垂直中心越过了谁的中线，就换到谁那里。
-    // 判定基准用 dyPx 而不是 dy —— 屏幕上就是这个整数位置，两者得一致。
-    // EPS 不能省：位移被夹在列表首尾之内时，拖到最上/最下那一档的瞬间，
-    // 卡片中心正好「等于」首/尾卡片的中线，严格大于会永远差一档，
-    // 表现为「怎么拖都放不到第一位 / 最后一位」。
-    const EPS = 0.5;
-    const center = base.top + base.height / 2 + dyPx;
-    let to = from;
-    while (to + 1 < n && center > rects[to + 1].top + rects[to + 1].height / 2 - EPS) to++;
-    while (to - 1 >= 0 && center < rects[to - 1].top + rects[to - 1].height / 2 + EPS) to--;
-
-    const crossed = to !== dg.to;
-    dg.to = to;
-    dg.dy = dyPx;
-
-    if (crossed) {
-      // 落点变了：让位位置必须整表重算，dragY 顺带一起推
-      dg.pushedY = dyPx;
-      this.paintDrag(dyPx, to);
-    } else if (dyPx !== dg.pushedY) {
-      // 高频通道：只推一个数字，且只在真的跨过一个整数像素时才推
-      dg.pushedY = dyPx;
-      this.setData({ dragY: dyPx });
-    }
-  },
-
-  /* ---- 拖到边缘时列表自动滚 ----
-     手柄解决了「拖动时列表还能不能滚」，但还差一步：手正按着手柄不放，
-     腾不出第二根手指去滑列表。所以手指贴到滚动区上下缘时，列表得自己滚 ——
-     贴着边缘不松手就一直滚，这样才够得着屏幕外的落点。 */
-
-  maybeAutoScroll(clientY) {
-    const dg = this._dg;
-    if (!dg) return;
-    // 滚动区没量到（或不支持测量）就整段跳过：不自动滚，但拖动本身一切照旧
-    const band = this._scBand;
-    if (!band) return;
-
-    const edge = LAYOUT.DRAG_EDGE;
-    let dir = 0;
-    if (clientY < band.top + edge) dir = -1;
-    else if (clientY > band.bottom - edge) dir = 1;
-
-    // 手指真的动了就清掉「这个方向已到头」的记录：
-    // 位置变了，原来的尽头可能已经不在尽头（列表滚动后下面又露出内容了）。
-    // 同时作废掉上一次的比对基准 —— 重新开始尝试，得重新比一次才知道滚没滚动。
-    // 不移开就一直不清：免得贴着尽头反复 setData 推一个不变的值。
-    if (dg.asY == null || Math.abs(clientY - dg.asY) > 4) {
-      dg.asDirDone = 0;
-      dg.asPending = null;
-      dg.asY = clientY;
-    }
-    dg.scrollDir = dir;
-    if (dir && !this._asTimer) this.runAutoScroll();
-  },
-
-  /* 自动滚一拍。为什么用 setTimeout 串成一拍一拍，而不是 setInterval：
-     ① 手指离开边缘（scrollDir 归 0）时，下一拍自然就停了，不用去 clearInterval；
-     ② 滚到顶/底时能识别出「推了没动」并收手，否则会一直对着墙 setData。
-     40ms 一格，接近 25fps，触屏上够跟手。 */
-  runAutoScroll() {
-    const that = this;
-    this._asTimer = setTimeout(function () {
-      that._asTimer = null;
-      const dg = that._dg;
-      if (!dg || !dg.scrollDir || dg.scrollDir === dg.asDirDone) return;
-
-      // 「推下去之后一点没动」＝ 已经滚到顶/底了。
-      // ⚠️ 这个判断必须放在**下一拍的开头**：bindscroll 是异步回来的，
-      //    在 setData 之后立刻比，_scrollTop 还没更新，会把正常滚动误判成到头。
-      if (dg.asPending != null && that._scrollTop === dg.asPending) {
-        dg.asDirDone = dg.scrollDir;
-        return;
-      }
-
-      dg.asPending = that._scrollTop;
-      that.setData({ scrollTop: that._scrollTop + dg.scrollDir * LAYOUT.AS_STEP });
-      that.runAutoScroll();
-    }, LAYOUT.AS_TICK);
-  },
-
-  // 拖动一结束就停：定时器活着会一直 setData，跳出排序模式后就成了幽灵滚动
-  stopAutoScroll() {
-    if (this._asTimer) {
-      clearTimeout(this._asTimer);
-      this._asTimer = null;
-    }
-  },
-
-  // 按当前 target 重算每行的让位位移。只在 to 变化时调用。
-  paintDrag(dy, to) {
-    const dg = this._dg;
-    if (!dg) return;
-    const flat = dg.flat;
-    const from = dg.from;
-    const slot = dg.rects[from].height + LAYOUT.ROW_GAP * this.rf;
-    const sameSec = flat[to].sec === flat[from].sec;
-
-    // 同段内：被拖卡片让出的空档由 [from, to] 之间的行整体补上一个卡位。
-    // 跨段时不做位移（卡片高度各不相同，硬算会错位），改用高亮提示落点。
-    function shiftOf(k) {
-      if (!sameSec || k === from) return 0;
-      if (from < to && k > from && k <= to) return -slot;
-      if (from > to && k >= to && k < from) return slot;
-      return 0;
-    }
-
-    const patch = { dragY: dy, dropQuad: sameSec ? '' : flat[to].quad };
-
-    if (this.state.view === 'detail') {
-      patch.rows = this.data.rows.map(function (r, i) {
-        return Object.assign({}, r, { shift: shiftOf(i) });
-      });
-    } else {
-      let k = 0;
-      patch.sections = this.data.sections.map(function (sec) {
-        return Object.assign({}, sec, {
-          rows: sec.rows.map(function (r) {
-            const s = shiftOf(k);
-            k++;
-            return Object.assign({}, r, { shift: s });
-          }),
-        });
-      });
-    }
-
-    this.setData(patch);
-  },
-
-  endDrag() {
-    const dg = this._dg;
-    this._dg = null;
-    this._dgP = null;
-    this.stopAutoScroll();
-    this.setData({ dragId: '', dragY: 0, dragOn: false, dropQuad: '', dragging: false });
-
-    if (!dg) {
-      this.render();
-      return;
-    }
-    const from = dg.from;
-    const to = dg.to;
-    if (to === from) {
-      this.render(); // 只是把位移还原
-      return;
-    }
-
-    const a = dg.flat[from];
-    const b = dg.flat[to];
-    const lists = [];
-
-    if (a.sec === b.sec) {
-      // 同段内换位：详情页按当前筛选做「可见项重排」，隐藏项原地不动
-      const full = this.inQuad(a.quad, false);
-      const vis = this.visibleIdx(full);
-      const fromPos = vis[a.idx];
-      const toPos = vis[b.idx];
-      if (fromPos === undefined || toPos === undefined) {
-        this.render();
-        return;
-      }
-      const seq = full.slice();
-      seq.splice(toPos, 0, seq.splice(fromPos, 1)[0]);
-      lists.push({ quad: a.quad, list: seq });
-    } else {
-      // 跨象限：从源象限摘出来，插到目标象限被悬停那一条的位置上
-      const src = this.inQuad(a.quad, false);
-      const dst = this.inQuad(b.quad, false);
-      const moving = src.splice(a.idx, 1)[0];
-      if (!moving) {
-        this.render();
-        return;
-      }
-      dst.splice(Math.min(b.idx, dst.length), 0, moving);
-      lists.push({ quad: a.quad, list: src });
-      lists.push({ quad: b.quad, list: dst });
-    }
-
-    this.commitOrder(lists);
-  },
-
-  /* ================= 交互：排序落库 ================= */
-
-  // lists: [{ quad, list }]，list 是该象限（当前分类内）事项的新顺序。
-  // 整段重写成 0/10/20…，只把真正变了的那几条发给云函数 ——
-  // 比「与邻居取中值」稳，也不会因为反复拖动把浮点间距耗光。
-  commitOrder(lists) {
-    const changed = [];
-    const plans = [];
-    lists.forEach(function (entry) {
-      entry.list.forEach(function (it, i) {
-        const o = i * ORDER_STEP;
-        if (it.order !== o || it.quad !== entry.quad) {
-          changed.push({ id: it._id, order: o, quad: entry.quad });
-        }
-        plans.push({ it: it, order: o, quad: entry.quad });
-      });
-    });
-
-    if (!changed.length) {
-      this.render();
-      return;
-    }
-    if (changed.length > REORDER_CAP) {
-      wx.showToast({ title: '一次最多重排 ' + REORDER_CAP + ' 条', icon: 'none' });
-      this.render();
-      return;
-    }
-
-    const that = this;
-    this.commit(
-      function () {
-        plans.forEach(function (p) {
-          p.it.order = p.order;
-          p.it.quad = p.quad;
-        });
-        // 渲染顺序直接来自镜像数组的顺序，改完 order 要重新排一遍
-        that.items.sort(function (x, y) {
-          return (x.order || 0) - (y.order || 0);
-        });
-      },
-      callCloud('reorder', { items: changed })
-    );
-  },
 
   onRowTap(e) {
     if (this.data.sortMode) return; // 排序模式下点卡片不编辑
@@ -1615,10 +1350,18 @@ Page({
     const it = this.findItem(id);
     if (!it) return;
     const next = !it.done;
+    // 进度与完成是同一条状态线：完成 = 进度 100%，撤销 = 归零
+    // （设计稿 §06 「点撤销 → 完成取消，进度归零」）。撤销若保留 100%，
+    // 卡片会显示满格却不算完成 —— 那等于没撤销。
+    //
+    // 落库只送 done：progress 由云函数按 done 推（见 updateItem 那段耦合）。
+    // 两边各推一次的话，就成了两个真相来源，迟早对不上。
+    const pct = next ? 100 : 0;
 
     this.commit(
       function () {
         it.done = next;
+        it.progress = pct;
       },
       callCloud('updateItem', { id: id, patch: { done: next } })
     );
@@ -1632,6 +1375,185 @@ Page({
     if (!id) return;
     this.closeSheet();
     this.toggleDone(id);
+  },
+
+  /* ---------------- 交互：事项进度条 ----------------
+     横向拖动改进度，拖到 100% 即完成，拖回来即自动撤销（设计稿 §06）。
+
+     ⚠️ 与卡片左滑的冲突必须在这一层解决，不能靠「谁先响应」——
+        两者都是横向手势，浏览器只会判给先到的那一方：
+        · `.prog` 用 **catchtouchstart** 截住手势，`.row-in` 的 onRowStart 收不到，
+          左滑从第一帧起就不会启动（和 `.dh` 手柄同一个手法）；
+        · `.prog` 用 **catchtap** 吸掉点击，否则「点一下改进度」会同时弹出编辑抽屉；
+        · touchmove 用 **bind** 而不是 catch —— 横滑才吃这一串手势，
+          纵滑原样放过给 scroll-view。若这里也 catch，每张卡片底部就会多出
+          一条 48rpx 高、按着滑不动的死区，长列表里非常难受。
+          （反过来也证明 catchtouchstart 不会挡住 scroll-view 自己滚动：
+            真要挡滚动，社区里就不必到处用 catchtouchmove 了。） */
+
+  onProgStart(e) {
+    // 排序模式下只允许拖手柄，进度条不响应（但手势照旧被 catch 截住，
+    // 所以也不会误触发卡片左滑）。
+    this._pg = null;
+    if (this.data.sortMode) return;
+    const t = e.touches && e.touches[0];
+    if (!t) return;
+    // 顺手清掉上一次手势的残留：`.row-in` 的 onRowMove 是 bind，这条 touchmove
+    // 会照样冒泡上去；`_drag` 若还留着旧起点，它会拿旧基准去判滑动的阈值。
+    this._drag = null;
+    this._pg = {
+      id: e.currentTarget.dataset.id,
+      x0: t.clientX,
+      y0: t.clientY,
+      dx: 0,
+      dy: 0,
+      armed: false,
+      rect: null,
+    };
+    this.measureTrack(this._pg.id);
+  },
+
+  onProgMove(e) {
+    const pg = this._pg;
+    if (!pg) return;
+    const t = e.touches && e.touches[0];
+    if (!t) return;
+    pg.dx = t.clientX - pg.x0;
+    pg.dy = t.clientY - pg.y0;
+    if (!pg.armed) {
+      if (Math.abs(pg.dx) < 5) return;
+      // 方向判别：横向位移压过纵向才算「拖进度」，否则这串手势属于列表滚动。
+      // 与左滑用的是同一个判据（见 onRowMove），区别是这里必须显式让路 ——
+      // 纵滑由视图层直接处理，我们唯一要做的是别去动它。
+      // 一旦判成纵向就永久放弃这一次手势（armed 保持 false），
+      // 免得用户「先往下滑、再往右滑」时把列表滚动硬生生掰成改进度。
+      if (Math.abs(pg.dx) <= Math.abs(pg.dy)) return;
+      pg.armed = true;
+      // 抓取反馈（轨道底色加深 + 圆点放大），与饮水卡那一条同款。
+      // 等判成横向拖动才给，不在 touchstart 就给 —— 否则每次「落在进度条上
+      // 往下滑列表」都会先闪一下放大，像是碰到了什么。
+      this.setRowFlag(pg.id, 'pgOn', true);
+    }
+    const v = this.progPctAt(pg.rect, t.clientX);
+    // 量不到轨道（还没量完 / 节点被回收）就跳过这一帧，而不是拿 0 顶上 ——
+    // 0 会把进度条当场拽回最左端，比不动更糟。
+    if (v === null) return;
+    this.paintProgress(pg.id, v);
+  },
+
+  onProgEnd() {
+    const pg = this._pg;
+    this._pg = null;
+    if (!pg) return;
+    // 抓取反馈先收掉。下面几条 return 分支（比如这条事项已经不在镜像里）
+    // 都走不到 commit，漏掉就会留下一个永远放大的圆点。
+    if (pg.armed) this.setRowFlag(pg.id, 'pgOn', false);
+    const it = this.findItem(pg.id);
+    if (!it) return;
+
+    if (!pg.armed) {
+      // 没进入拖动，有两种可能，靠位移分辨：
+      //   位移很小 → 「点一下」：按住轨道任意位置，圆点直接跳过去（设计稿 §06 第一行）。
+      //              圆点只有 30rpx，不要求用户先精确按住它。
+      //   位移不小 → 其实是在这一条上往下滑列表，绝不能顺手把进度改掉。
+      if (Math.abs(pg.dx) > 6 || Math.abs(pg.dy) > 6) return;
+      const v = this.progPctAt(pg.rect, pg.x0);
+      if (v === null) return;
+      this.paintProgress(pg.id, v);
+    }
+
+    const pct = itemPct(it);
+    // 松手才落库。拖动期间每帧发一次云函数的话，就是几十个并发请求，
+    // 而且它们还可能乱序到达 —— 最后到的那个不一定是你最后拖到的值。
+    this.commit(
+      function () {
+        it.progress = pct;
+        it.done = pct >= 100;
+      },
+      callCloud('updateItem', { id: pg.id, patch: { progress: pct } })
+    );
+  },
+
+  // 存在的唯一目的是**吸掉**这次点击：`.row-in` 上的 catchtap（点卡片进编辑）
+  // 在拖动结束后的那一下会跟着触发，于是「拖完成」会顺带弹出编辑抽屉。
+  onProgTap() {
+    /* 有意为空 —— 这是事件屏障，不是忘了实现 */
+  },
+
+  // 量一次这条进度条的**轨道**矩形（不含右侧读数区），把手指的 x 换算成百分比。
+  // 一次手势只量一次：每帧都量等于每帧一次视图层往返，拖动会肉眼可见地滞后。
+  measureTrack(id) {
+    const that = this;
+    wx.createSelectorQuery()
+      .select('#rpt-' + id)
+      .boundingClientRect(function (r) {
+        // 回调是异步的，回来时这一串手势可能已经结束、甚至换了一条事项
+        if (that._pg && that._pg.id === id) that._pg.rect = r || null;
+      })
+      .exec();
+  },
+
+  // 手指的 x → 百分比。rect 由调用方传进来，**不要**让它自己去读 this._pg ——
+  // onProgEnd 在落库前会先把手势状态清掉，那时候再读就什么都读不到了，
+  // 而这条路径恰好是「点一下，圆点跳过去」，它会整条静默失效
+  // （不报错、不落库、进度也不动，看起来跟没点到一样）。测试抓到的就是这个。
+  progPctAt(rect, clientX) {
+    if (!rect || !rect.width) return null;
+    const v = ((clientX - rect.left) / rect.width) * 100;
+    return Math.max(0, Math.min(100, Math.round(v)));
+  },
+
+  // 拖动中每一帧都调它：镜像 + 这一行的路径 setData。
+  // 这是设计稿那句「拖动过程中不做整页重绘」在 WXML 侧的等价写法 ——
+  // 不走 render()，所以列表不重排、统计条不重算、其它卡片一个字节都不动。
+  paintProgress(id, pct) {
+    const it = this.findItem(id);
+    if (!it) return;
+    // 镜像先改：松手落库读的是它，统计与筛选也读它
+    it.progress = pct;
+    it.done = pct >= 100;
+    const path = this.progPath(id);
+    if (!path) return;
+    const patch = {};
+    patch[path + '.pct'] = pct;
+    patch[path + '.done'] = it.done;
+    this.setData(patch);
+  },
+
+  // 只改某一行的一个布尔位（进度条的「正被按住」标记走这里）。
+  // 不进镜像 —— 它是纯视图态，render() 重建行数据时会被 rowVM 复位成 false，
+  // 这正好是一层免费的兜底：任何中断都不会让它粘住。
+  setRowFlag(id, key, val) {
+    const path = this.progPath(id);
+    if (!path) return;
+    const patch = {};
+    patch[path + '.' + key] = val;
+    this.setData(patch);
+  },
+
+  // 这一行在 data 里的 setData 路径。详情页是 rows[i]，「全部」页是 sections[j].rows[i]
+  // —— 两个视图共用同一个模板，却落在两棵不同的数据树上。
+  // ⚠️ 只看当前视图那一棵：两棵都扫的话切视图的瞬间可能同时命中同一个 id，
+  //    改错一棵的表现是「数据对了，屏幕没动」，最难查的那种。
+  progPath(id) {
+    const v = this.state.view;
+    if (v === 'detail') {
+      const rows = this.data.rows || [];
+      for (let i = 0; i < rows.length; i++) {
+        if (rows[i]._id === id) return 'rows[' + i + ']';
+      }
+      return '';
+    }
+    if (v === 'all') {
+      const secs = this.data.sections || [];
+      for (let j = 0; j < secs.length; j++) {
+        const rs = secs[j].rows || [];
+        for (let i = 0; i < rs.length; i++) {
+          if (rs[i]._id === id) return 'sections[' + j + '].rows[' + i + ']';
+        }
+      }
+    }
+    return '';
   },
 
   askDelete(id) {
@@ -2330,4 +2252,11 @@ Page({
   onNew() {
     this.openForm(null, 'q1');
   },
-});
+};
+
+/* 拖动排序的状态机从 utils/drag.js 合并进来。
+   方法与原先写在对象字面量里完全等价（同一份 this、同一套 _* 实例状态），
+   所以调用点一处都不用改；WXML 上的 bindtap="onSortToggle" 等也照原样生效。 */
+Object.assign(pageDef, drag);
+
+Page(pageDef);

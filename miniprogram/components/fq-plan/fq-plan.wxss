@@ -1,0 +1,96 @@
+/* components/fq-plan/fq-plan.wxss
+   计划卡（日程页的两张）
+   ============================================================
+   换算：设计稿 new-features.html 的 px × 2 = rpx（750rpx = 屏宽）。
+   左侧那道色条（::before）是这张卡唯一的身份标识，颜色走 --ac：
+     day  → --q1     next → --blue
+   色条与图标都不是「信息」本身，标题文案才是 —— 所以即使把颜色全去掉，
+   两张卡仍然读得出来（标题写着「今天 / 明天 / 这天 / 次日」）。
+
+   ⚠️ 颜色是烤进 SVG data URI 里的（背景图不认 currentColor），
+      图标色取 --ink3 的 #98a0ac。改主题灰要连 data URI 一起改。
+   ============================================================ */
+
+.apcard {
+  position: relative;
+  overflow: hidden;        /* 裁掉色条的圆角溢出 */
+  background: #fff;
+  border: 2rpx solid var(--line);
+  border-radius: 24rpx;
+  padding: 22rpx 26rpx;
+  margin-bottom: 16rpx;
+}
+
+/* 左侧色条。宽度 6rpx 是设计稿的 3px —— 比卡片描边粗一倍才看得出是「条」而不是边。 */
+.apcard::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 6rpx;
+  background: var(--ac);
+}
+
+.apcard.day { --ac: var(--q1); }
+.apcard.next { --ac: var(--blue); }
+
+/* 头部：图标 + 标题 + 右侧日期。三者用 margin 排，不用 gap ——
+   本项目不依赖 flex 的 gap（见 fq-cal.wxss 头注释）。 */
+.aphead {
+  display: flex;
+  align-items: center;
+}
+
+.apico {
+  flex: 0 0 auto;
+  width: 26rpx;
+  height: 26rpx;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: contain;
+}
+
+/* 太阳：今天 / 这一天 */
+.apico.day {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%2398a0ac' stroke-width='1.7' stroke-linecap='round'%3E%3Ccircle cx='10' cy='10' r='3.6'/%3E%3Cpath d='M10 2v2M10 16v2M2 10h2M16 10h2M4.3 4.3l1.4 1.4M14.3 14.3l1.4 1.4M15.7 4.3l-1.4 1.4M5.7 14.3l-1.4 1.4'/%3E%3C/svg%3E");
+}
+
+/* 月亮：明天 / 次日 */
+.apico.next {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%2398a0ac' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M16.5 12.3A7 7 0 0 1 7.7 3.5a7 7 0 1 0 8.8 8.8z'/%3E%3C/svg%3E");
+}
+
+.aplabel {
+  margin-left: 12rpx;
+  font-size: 22rpx;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--ink3);
+}
+
+/* margin-left:auto 把自己推到最右 —— 不用给中间那个 .aplabel 设 flex:1，
+   标题短的时候日期也不会跟着往左跑。 */
+.apdate {
+  margin-left: auto;
+  font-size: 22rpx;
+  font-weight: 500;
+  color: var(--ink3);
+  font-variant-numeric: tabular-nums;
+}
+
+.apbody {
+  display: block;             /* text 默认行内，多行/内边距都要块级才稳 */
+  margin-top: 12rpx;
+  font-size: 26rpx;
+  line-height: 1.55;
+  color: var(--ink);
+  /* pre-wrap：换行符原样保留（textarea 里敲的回车会存进 text），
+     同时照常自动折行 —— 用 pre 会让长行顶出卡片。 */
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.apbody.ph {
+  color: var(--ink3);
+}

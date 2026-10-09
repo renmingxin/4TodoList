@@ -1,0 +1,30 @@
+<!-- components/fq-cats/fq-cats.wxml
+     分类胶囊条（仅总览）
+     从 pages/index/index.wxml 整段搬来。结构一字未改 —— 只有挂在根上的
+     wx:if 挪到了组件标签上（「该不该出现」是页面的事，不是组件的事）。 -->
+  <!-- ============ 分类胶囊（仅总览） ============
+       右侧「+」固定成独立一列，左边的胶囊自己横向滚动。
+       早先把新增按钮放在 scroll-view 内部，分类一多它就被滚出屏幕，再也点不到。 -->
+  <view class="catsrow">
+    <!-- flex 容器必须放在 scroll-view 内部（.cats-inner）：
+         直接给 scroll-view 写 display:flex（配 enable-flex）实测无效，
+         胶囊会按行内盒排在文字基线上，被 scroll-view 的 overflow:hidden
+         从顶部裁掉约 13px（表现为「标签块被遮挡 + 文字不居中」）。 -->
+    <scroll-view class="cats" scroll-x>
+      <view class="cats-inner">
+        <view
+          class="cat {{item.on?'on':''}}"
+          wx:for="{{catTabs}}"
+          wx:key="id"
+          data-k="{{item.id}}"
+          bindtap="onPickCat"
+        >
+          <text>{{item.name}}</text>
+          <text class="cnt">{{item.count}}</text>
+        </view>
+      </view>
+    </scroll-view>
+    <view class="cats-add" bindtap="onAddCategory">
+      <view class="ico ico-plus"></view>
+    </view>
+  </view>

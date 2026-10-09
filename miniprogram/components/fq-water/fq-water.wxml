@@ -1,0 +1,46 @@
+<!-- components/fq-water/fq-water.wxml
+     今日饮水 · 挂在总览页统计条下方的一条 2000ml 可拖动进度条。
+
+     为什么放在总览页、而不是塞进某个象限：象限里装的是「事」—— 做完一件划掉一件；
+     饮水是「今天的身体指标」，有固定目标、一天内反复增减。硬塞进「重要 × 紧急」
+     的坐标系会把那套判断标准搅浑。
+
+     拖动的三条要点：
+       ① 横向拖动是这条自己的手势：start / move / end 全用 catch，
+          事件不再冒泡到 scroll-view —— 否则手指一横拉，整页会跟着滚。
+          （和排序模式的手柄 .dh 是同一个思路：把「拖」和「滚」分派到不同元素上，
+          而不是去开关 scroll-y。）
+       ② 按住期间只改 wcur 一个数字，松手才把最终值交给页面落库。
+          饮水不参与任何象限统计，松手后没有汇总值要同步，所以**不做整页重绘**。
+       ③ 数值按 40 档吸附（默认 50ml/档），读数不会出现 1237 这种数字。
+
+     刻度画成 3 道白线叠在轨道之上：落在灰色空轨上是「缺口」，落在蓝色填充上是
+     「分节」。一套元素服务两种底色，不必为已填充段和未填充段各画一份刻度。
+
+     达标不能只靠颜色：提示文案同步从「还差 N ml」换成「今日目标已达成 ✓」，
+     色彩与文字两条线同时给出结果，色觉障碍用户同样读得出来。 -->
+<view class="water {{wcur >= goal ? 'full' : ''}}">
+  <view class="wtop">
+    <view class="wic"></view>
+    <text class="wname">今日饮水</text>
+    <text class="whint">{{wcur >= goal ? '今日目标已达成 ✓' : '还差 ' + (goal - wcur) + ' ml'}}</text>
+    <text class="wval"><text class="wv">{{wcur}}</text><text>/ {{goal}} ml</text></text>
+  </view>
+
+  <!-- 轨道：线细（14rpx）、触区厚（48rpx）。命中面积是看上去的三倍多，手指不会点空。 -->
+  <view
+    class="wtrack {{wdrag ? 'on' : ''}}"
+    catchtouchstart="onWaterStart"
+    catchtouchmove="onWaterMove"
+    catchtouchend="onWaterEnd"
+    catchtouchcancel="onWaterEnd"
+  >
+    <view class="wbar">
+      <view class="wfill" style="width:{{wcur * 100 / goal}}%"></view>
+      <view class="wtick" style="left:25%"></view>
+      <view class="wtick" style="left:50%"></view>
+      <view class="wtick" style="left:75%"></view>
+      <view class="wknob" style="left:{{wcur * 100 / goal}}%"></view>
+    </view>
+  </view>
+</view>

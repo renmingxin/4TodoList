@@ -1,0 +1,83 @@
+/* components/fq-cats/fq-cats.wxss
+   分类胶囊条（仅总览）
+   规则原在 pages/index/index.wxss 里，整段搬来、一字未改。
+   共享资产（自绘图标 .ico-* / 象限图标 .qmark / 按钮 .btn*）留在 app.wxss，
+   靠 styleIsolation: apply-shared 生效 —— 所以这里只有本组件自己的骨架。
+   ============================================================== */
+
+/* ---------------- 分类胶囊 ---------------- */
+
+/* 整行是 flex：右侧「+」是固定宽度的独立一列，左侧胶囊区 flex:1 + min-width:0
+   自己横向滚动。这样分类再多，新增入口也永远钉在右边。
+   （min-width:0 不能省：flex item 默认 min-width:auto，会被内容顶宽，滚不起来的正是它。） */
+.catsrow {
+  flex: 0 0 auto;
+  height: 88rpx;
+  padding: 28rpx 32rpx 0;
+  display: flex;
+  align-items: flex-start;
+}
+
+/* scroll-view 只负责横向滚动，不承担 flex 布局。
+   ⚠️ 不要在 scroll-view 上写 display:flex 指望胶囊变成 flex item ——
+   实测（截图 531×73 像素测量）胶囊仍按行内盒排在文字基线上：
+   真实位置比内容框高出约 13px，顶部被 overflow:hidden 削平，
+   表现为「标签块被遮挡、文字不在中间」。
+   正解：把 flex 容器放进 scroll-view 里（.cats-inner），
+   块级 flex 容器没有基线对齐问题，子项就是老老实实的 flex item。 */
+.cats {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 60rpx;
+}
+
+/* width:max-content 让内容有多宽就铺多宽（横向滚动的关键）；
+   引擎不支持时该声明被忽略，退回 block 的 100% 宽 + 子项溢出，同样可滚。 */
+.cats-inner {
+  display: flex;
+  align-items: center;
+  height: 60rpx;
+  width: max-content;
+}
+
+.cats-add {
+  flex: 0 0 auto;
+  width: 60rpx;
+  height: 60rpx;
+  margin-left: 14rpx;
+  border-radius: 999rpx;
+  border: 2rpx dashed var(--line);
+  background: #fff;
+  color: var(--ink3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cat {
+  flex: 0 0 auto;
+  height: 60rpx;
+  padding: 0 26rpx;
+  margin-right: 14rpx;
+  border-radius: 999rpx;
+  border: 2rpx solid var(--line);
+  background: #fff;
+  color: var(--ink2);
+  font-size: 26rpx;
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+}
+
+.cat .cnt {
+  font-size: 22rpx;
+  opacity: 0.65;
+  margin-left: 10rpx;
+  font-variant-numeric: tabular-nums;
+}
+
+.cat.on {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: #fff;
+}

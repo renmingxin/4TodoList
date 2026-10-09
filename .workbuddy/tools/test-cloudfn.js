@@ -705,8 +705,12 @@ async function run() {
     // 模板 id 只由服务端下发 —— 客户端硬编码一份的话，换模板时必然漏改
     eq('模板 id 由服务端下发', boot.data.sub.templateId, TPL);
     eq('action 清单里多了 grantSub', boot.data.actions.indexOf('grantSub') >= 0, true);
-    eq('action 清单长度 18', boot.data.actions.length, 18);
-    eq('握手版本已升到 5', boot.data.fnVer, 5);
+    eq('action 清单里多了 savePlan', boot.data.actions.indexOf('savePlan') >= 0, true);
+    // 长度是**故意写死的绊线**：加了 action 就得来这里走一趟，顺手把新 action 的用例补上。
+    eq('action 清单长度 19', boot.data.actions.length, 19);
+    // 版本号的**绝对值**不写死 —— FN_VER 从云函数源码读（run() 顶部），
+    // 这里只断言「bootstrap 上报的 === 源码声明的」：两边一起升才不会白握手。
+    eq('握手版本与源码声明一致（v' + FN_VER + '）', boot.data.fnVer, FN_VER);
 
     // ---- 模板必须对得上 ----
     const wrong = await call({ action: 'grantSub', templateId: 'someone-elses-template' });
@@ -823,6 +827,83 @@ async function run() {
     FC.OPENID = 'openid-b';
     const boot6 = await call({ action: 'bootstrap' });
     eq('别人没送达的不计进我的 missed', boot6.data.sub.missed, 0);
+  }
+
+  console.log('\n[21] 事项进度：progress 与 done 是同一条状态线');
+  {
+    reset();
+    const boot0 = await call({ action: 'bootstrap' });
+    const catId = boot0.data.categories[0]._id;
+
+    // 种子事项也必须从 0% 起步 —— 少写这一处，「新库里的第一条事项」
+    // 就成了整库里唯一没有 progress 的行。
+    eq(
+      '种子事项也带 progress（没有漏掉的行）',
+      COLLECTIONS.fq_items.filter(function (r) { return typeof r.progress !== 'number'; }).length,
+      0
+    );
+
+    const added = await call({
+      action: 'addItem',
+      item: { title: '给事项加进度', quad: 'q1', catId: catId, priority: 3 },
+    });
+    const id = added.data._id;
+    eq('新建事项落库 progress = 0', byId(id).progress, 0);
+    eq('新建事项未完成', byId(id).done, false);
+
+    // ---- 客户端送 progress（拖进度条走这条）----
+    await call({ action: 'updateItem', id: id, patch: { progress: 60 } });
+    eq('送 60% → 落库 60', byId(id).progress, 60);
+    eq('送 60% → 不算完成', byId(id).done, false);
+
+    await call({ action: 'updateItem', id: id, patch: { progress: 100 } });
+    eq('送 100% → 进度 100', byId(id).progress, 100);
+    eq('送 100% → 自动成为已完成', byId(id).done, true);
+    ok('完成时间被记下', byId(id).doneAt && byId(id).doneAt.__serverDate);
+    eq('完成人由服务端填', byId(id).doneBy, 'openid-me');
+
+    await call({ action: 'updateItem', id: id, patch: { progress: 99 } });
+    eq('从 100% 拖回 99% → 自动撤销完成', byId(id).done, false);
+    eq('撤销后进度停在 99（不是归零，也不是留 100）', byId(id).progress, 99);
+    eq('撤销后完成时间清空', byId(id).doneAt, null);
+    eq('撤销后完成人清空', byId(id).doneBy, '');
+
+    // ---- 客户端只送 done（左滑的「完成 / 撤销」走这条，老版本客户端也只有这条）----
+    await call({ action: 'updateItem', id: id, patch: { done: true } });
+    eq('只送 done:true → 进度补齐到 100（不留「完成但 60%」的矛盾行）', byId(id).progress, 100);
+    await call({ action: 'updateItem', id: id, patch: { done: false } });
+    eq('撤销 → 进度归零（保留 100% 等于没撤销）', byId(id).progress, 0);
+
+    // ---- 边界与脏数据 ----
+    await call({ action: 'updateItem', id: id, patch: { progress: 150 } });
+    eq('150% 夹到 100', byId(id).progress, 100);
+    eq('夹到 100 之后自然算完成', byId(id).done, true);
+    await call({ action: 'updateItem', id: id, patch: { progress: -5 } });
+    eq('-5% 夹到 0', byId(id).progress, 0);
+    await call({ action: 'updateItem', id: id, patch: { progress: 72.6 } });
+    eq('小数落到整数（拖动的每一帧都是小数）', byId(id).progress, 73);
+    await call({ action: 'updateItem', id: id, patch: { progress: 'abc' } });
+    eq('非数字落 0，不是 NaN', byId(id).progress, 0);
+
+    // ---- 自相矛盾的一对 ----
+    await call({ action: 'updateItem', id: id, patch: { progress: 60, done: true } });
+    eq('矛盾输入以 done 为准：进度补到 100', byId(id).progress, 100);
+    eq('矛盾输入以 done 为准：确实完成', byId(id).done, true);
+
+    // ---- 不变量本身 ----
+    // 逐条断言容易漏掉某条路径；这里直接把整库拉出来验「done ⟺ progress===100」。
+    await call({ action: 'updateItem', id: id, patch: { progress: 30 } });
+    const bad = COLLECTIONS.fq_items.filter(function (r) {
+      return !!r.done !== (r.progress === 100);
+    });
+    eq('全库没有「已完成但进度不满 / 进度满却未完成」的行', bad.length, 0);
+
+    // ---- 批量路径不能成为破口（markAllDone 绕过 updateItem）----
+    await call({ action: 'bulk', op: 'markAllDone', quad: 'q1', catId: catId });
+    const still = COLLECTIONS.fq_items.filter(function (r) {
+      return r.quad === 'q1' && (!r.done || r.progress !== 100);
+    });
+    eq('批量标记完成 → 进度一并补到 100', still.length, 0);
   }
 
   console.log('\n----------------------------------------');

@@ -1,0 +1,11 @@
+<!-- components/fq-bottombar/fq-bottombar.wxml
+     详情页底部主按钮
+     从 pages/index/index.wxml 整段搬来。结构一字未改 —— 只有挂在根上的
+     wx:if 挪到了组件标签上（「该不该出现」是页面的事，不是组件的事）。 -->
+  <!-- ============ 详情页底部主按钮 ============ -->
+  <view class="bottombar">
+    <view class="btn dark" bindtap="onNewHere">
+      <view class="ico ico-plus sm"></view>
+      <text>在此象限新建</text>
+    </view>
+  </view>

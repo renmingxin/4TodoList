@@ -1,0 +1,30 @@
+<!-- components/fq-plan/fq-plan.wxml
+     一张计划卡（「这一天要做什么」/「次日准备做什么」）
+
+     两张卡是同一个组件、同一份数据形状，差别只在 kind：
+       day  → 红色色条 + 太阳图标，内容是**选中那天**的计划
+       next → 蓝色色条 + 月亮图标，内容是**次日**的计划
+
+     图标按「卡槽」而不是按日历语义走：卡 1 永远是太阳、卡 2 永远是月亮
+     （与设计稿一致）。选中过去的日子时卡 1 的标题会变成「昨天做了什么」，
+     但图标仍留在卡槽上 —— 让同一张卡在不同日期下保持同一个身份，
+     用户扫一眼位置就知道是哪一张。
+
+     空态不是「什么都不显示」：占位文案本身就是入口，
+     卡片空着的时候正好在说「点我写一句」。
+
+     ⚠️ 类名一律带 ap 前缀（apcard/aphead/apdate…）：页面里已经有一个 .pdate
+        （事项表单里的日期 picker）。组件样式隔离是 apply-shared —— 页面样式会
+        进到组件里，同名就是互相串味，而这类冲突**不报错、只在某个角落看走样**。
+        .workbuddy/tools/class-collision.js 专抓这个。 -->
+<view class="apcard {{kind}}" data-kind="{{kind}}" bindtap="onEdit">
+  <view class="aphead">
+    <view class="apico {{kind}}"></view>
+    <text class="aplabel">{{label}}</text>
+    <text class="apdate">{{dateShort}}</text>
+  </view>
+  <!-- 有内容显示内容，没有则显示占位（两者是同一个元素位置的两种状态，
+       所以用 wx:if/wx:else 而不是把文案拼进同一个插值里）。 -->
+  <text class="apbody" wx:if="{{text}}">{{text}}</text>
+  <text class="apbody ph" wx:else>{{placeholder}}</text>
+</view>

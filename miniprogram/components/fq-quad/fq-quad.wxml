@@ -1,0 +1,38 @@
+<!-- components/fq-quad/fq-quad.wxml
+     总览 2×2 满色矩阵
+     从 pages/index/index.wxml 整段搬来。结构一字未改 —— 只有挂在根上的
+     wx:if 挪到了组件标签上（「该不该出现」是页面的事，不是组件的事）。 -->
+        <view class="grid {{fill?'fill':''}}">
+          <view
+            class="q {{item.key}} {{item.nb?'nb':''}}"
+            wx:for="{{grid}}"
+            wx:key="key"
+            data-k="{{item.key}}"
+            bindtap="onOpenQuad"
+          >
+            <view class="qtop">
+              <!-- 图标与象限名同一行；白圆底 + 同象限色字形。
+                   字形（火焰 / 闪电 / 灯泡 / 咖啡杯）按 .q1~.q4 祖先类选，
+                   所以这里不需要传 key —— 卡片本身就是 .q.q1 这样带象限类的。 -->
+      <view class="qrow">
+        <!-- 象限键直接挂在图标元素上：字形规则是复合类 .qmark.q1
+             （不是后代类），见 app.wxss 的「共享视觉资产」段。 -->
+        <view class="qmark {{item.key}}"></view>
+        <text class="qname">{{item.name}}</text>
+      </view>
+              <text class="qhint">{{item.hint}}</text>
+            </view>
+            <view class="qnum num">{{item.count}}</view>
+            <view class="qlist">
+              <block wx:if="{{item.empty}}">
+                <view class="gempty">空着挺好<text class="s">点进来放点东西</text></view>
+              </block>
+              <block wx:else>
+                <view class="gi" wx:for="{{item.lines}}" wx:for-item="ln" wx:key="idx">
+                  <view class="dot" style="{{ln.more?'background:transparent':''}}"></view>
+                  <text class="tx">{{ln.text}}</text>
+                </view>
+              </block>
+            </view>
+          </view>
+        </view>

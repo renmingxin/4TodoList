@@ -1,0 +1,32 @@
+/* components/fq-filters/fq-filters.wxss
+   详情页筛选（待办 / 已完成 / 全部）
+   规则原在 pages/index/index.wxss 里，整段搬来、一字未改。
+   共享资产（自绘图标 .ico-* / 象限图标 .qmark / 按钮 .btn*）留在 app.wxss，
+   靠 styleIsolation: apply-shared 生效 —— 所以这里只有本组件自己的骨架。
+   ============================================================== */
+
+/* ---------------- 详情筛选 ---------------- */
+
+.filters {
+  flex: 0 0 auto;
+  padding: 24rpx 32rpx 8rpx;
+  display: flex;
+}
+
+.f {
+  font-size: 24rpx;
+  padding: 10rpx 24rpx;
+  margin-right: 14rpx;
+  border-radius: 999rpx;
+  border: 2rpx solid var(--line);
+  background: #fff;
+  color: var(--ink2);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+}
+
+.f.on {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: #fff;
+}

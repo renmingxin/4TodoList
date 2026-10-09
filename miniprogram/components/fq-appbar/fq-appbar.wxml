@@ -1,0 +1,17 @@
+<!-- components/fq-appbar/fq-appbar.wxml
+     顶部应用栏（总览 / 全部 / 我的）
+     从 pages/index/index.wxml 整段搬来。结构一字未改 —— 只有挂在根上的
+     wx:if 挪到了组件标签上（「该不该出现」是页面的事，不是组件的事）。 -->
+  <view class="appbar" style="padding-right:{{capsuleReserve}}px">
+    <view class="appbar-text">
+      <view class="h2">{{pageTitle}}</view>
+      <text class="meta">{{pageMeta}}</text>
+    </view>
+    <view class="iconbtn" bindtap="onGotoMine">
+      <view class="ico ico-sliders">
+        <view class="sl"><view class="kn" style="left:72%"></view></view>
+        <view class="sl"><view class="kn" style="left:28%"></view></view>
+        <view class="sl"><view class="kn" style="left:55%"></view></view>
+      </view>
+    </view>
+  </view>

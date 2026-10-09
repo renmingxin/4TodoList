@@ -1,0 +1,256 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>日程页 · 布局实测</title>
+<style>
+  /* 换算：1rpx = 1px。画布 = iPhone 14 Pro → 1626rpx 高（与 final-overview.html 同一把尺）。
+     色值直接取自 app.wxss 的 token，尺寸直接取自 fq-cal.wxss / fq-plan.wxss /
+     index.wxss 的日程段 —— 这里是"把 WXSS 抄成 HTML"，不是"照着印象画一个像的"。
+
+     2026-10-09：这一版**故意选中了 10 月 17 日（不是今天）**。
+     因为本轮修的 bug 只在「选中日 ≠ 今天」时才看得出来：
+       页眉那行小标题固定显示今天，下面 .dayh 那行才跟着选中日走。 */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 750px; height: 1626px; overflow: hidden; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f4f5f7; }
+  .screen { position: absolute; top: 0; left: 0; width: 750px; height: 1626px;
+            display: flex; flex-direction: column; background: #f4f5f7; overflow: hidden; }
+  .statusbar { flex: 0 0 auto; height: 59px; }
+
+  .appbar { flex: 0 0 auto; height: 88px; display: flex; align-items: center; justify-content: space-between; padding: 0 32px; }
+  .appbar .t { font-size: 36px; font-weight: 700; color: #16181c; }
+  .appbar .m { font-size: 22px; color: #98a0ac; margin-top: 2px; }
+
+  .schedwrap { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+  .schcal { flex: 0 0 auto; padding: 24px 32px 0; }
+  .schbody { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0 32px 24px; }
+
+  /* ---- fq-cal ---- */
+  .monthbar { display: flex; align-items: center; padding: 4px 0 20px; }
+  .monthbar .mv { flex: 1; font-size: 32px; font-weight: 600; letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+  .mbtn { flex: 0 0 auto; height: 60px; min-width: 60px; margin-left: 14px; padding: 0 18px;
+          border: 2px solid #e4e7ec; border-radius: 18px; background: #fff; color: #5b6472;
+          font-size: 24px; font-weight: 600; display: flex; align-items: center; justify-content: center; }
+  .mbtn.on { background: #16181c; border-color: #16181c; color: #fff; }
+  .ar { width: 24px; height: 24px; border-top: 4px solid #5b6472; border-right: 4px solid #5b6472; }
+  .ar.l { transform: rotate(-135deg); }
+  .ar.r { transform: rotate(45deg); }
+
+  .cal { background: #fff; border: 2px solid #e4e7ec; border-radius: 28px; padding: 18px 12px 22px; }
+  .cal .wk { display: grid; grid-template-columns: repeat(7, 1fr); margin-bottom: 2px; }
+  .cal .wk span { display: block; height: 38px; line-height: 38px; text-align: center;
+                  font-size: 21px; font-weight: 600; color: #98a0ac; }
+  .cal .days { display: grid; grid-template-columns: repeat(7, 1fr); }
+  .dy { min-width: 0; height: 76px; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .dy .num { width: 56px; height: 56px; border: 3px solid transparent; border-radius: 50%;
+             display: flex; align-items: center; justify-content: center;
+             font-size: 25px; font-weight: 500; color: #16181c; font-variant-numeric: tabular-nums; }
+  .dy .dt { display: flex; height: 8px; margin-top: 6px; }
+  .dy .dt .i { width: 8px; height: 8px; border-radius: 50%; background: #b4bac3; }
+  .dy .dt .i.q { background: #cbd1d8; }
+  .dy .dt .i + .i { margin-left: 5px; }
+  .dy.other .num { color: #c6cbd3; }
+  .dy.today .num { border-color: #16181c; font-weight: 600; }
+  .dy.sel .num { background: #16181c; border-color: #16181c; color: #fff; font-weight: 600; }
+  .dy.sel .dt .i { background: #16181c; }
+  .dy.sel .dt .i.q { background: #b4bac3; }
+
+  /* ---- 日期头 / 分节 ---- */
+  .dayh { display: flex; align-items: center; padding: 20px 4px 18px; }
+  .dayh .d { font-size: 30px; font-weight: 600; letter-spacing: -.01em; }
+  .dayh .now { margin-left: 16px; padding: 5px 14px; border-radius: 999px; background: #16181c;
+               color: #fff; font-size: 20px; font-weight: 600; }
+  .dayh .r { margin-left: auto; font-size: 22px; color: #98a0ac; }
+  .dsec { display: flex; align-items: center; padding: 20px 4px 16px; font-size: 22px;
+          font-weight: 600; letter-spacing: .03em; color: #98a0ac; }
+  .dsec .ln { flex: 1; height: 2px; margin-left: 16px; background: #e4e7ec; }
+
+  /* ---- fq-plan ---- */
+  .apcard { position: relative; overflow: hidden; background: #fff; border: 2px solid #e4e7ec;
+            border-radius: 24px; padding: 22px 26px; margin-bottom: 16px; }
+  .apcard::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 6px; }
+  .apcard.day::before { background: #d9303c; }
+  .apcard.next::before { background: #2563eb; }
+  .aphead { display: flex; align-items: center; }
+  .apico { flex: 0 0 auto; width: 26px; height: 26px; background-repeat: no-repeat;
+           background-position: center; background-size: contain; }
+  .apico.day { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%2398a0ac' stroke-width='1.7' stroke-linecap='round'%3E%3Ccircle cx='10' cy='10' r='3.6'/%3E%3Cpath d='M10 2v2M10 16v2M2 10h2M16 10h2M4.3 4.3l1.4 1.4M14.3 14.3l1.4 1.4M15.7 4.3l-1.4 1.4M5.7 14.3l-1.4 1.4'/%3E%3C/svg%3E"); }
+  .apico.next { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%2398a0ac' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M16.5 12.3A7 7 0 0 1 7.7 3.5a7 7 0 1 0 8.8 8.8z'/%3E%3C/svg%3E"); }
+  .aplabel { margin-left: 12px; font-size: 22px; font-weight: 600; letter-spacing: .03em; color: #98a0ac; }
+  .apdate { margin-left: auto; font-size: 22px; font-weight: 500; color: #98a0ac; }
+  .apbody { display: block; margin-top: 12px; font-size: 26px; line-height: 1.55; color: #16181c;
+            white-space: pre-wrap; word-break: break-word; }
+  .apbody.ph { color: #98a0ac; }
+
+  /* ---- 事项行 ---- */
+  .minirow { display: flex; align-items: center; padding: 18px 24px; margin-bottom: 14px;
+             background: #fff; border: 2px solid #e4e7ec; border-radius: 22px; font-size: 25px; }
+  .minirow .qq { flex: 0 0 12px; width: 12px; height: 12px; border-radius: 50%; }
+  .minirow .tt { flex: 1; min-width: 0; margin-left: 18px; overflow: hidden;
+                 text-overflow: ellipsis; white-space: nowrap; }
+  .minirow .tt.dn { color: #98a0ac; text-decoration: line-through; }
+  .minirow .pp { flex: 0 0 auto; margin-left: 16px; font-size: 21px; font-weight: 600;
+                 color: #98a0ac; font-variant-numeric: tabular-nums; }
+  .dempty { display: block; padding: 8px 4px 20px; font-size: 23px; color: #98a0ac; }
+
+  /* ---- tabbar（4 个） ---- */
+  .tabbar { flex: 0 0 auto; background: #fff; border-top: 2px solid #eceff3; padding-bottom: 65px; }
+  .tb { height: 120px; display: flex; align-items: center; }
+  .tb .it { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .tb .ic { width: 38px; height: 38px; border-radius: 9px; background: #c9ced6; }
+  .tb .lb { font-size: 20px; color: #98a0ac; margin-top: 6px; }
+  .tb .it.on .ic { background: #2563eb; }
+  .tb .it.on .lb { color: #2563eb; }
+
+  .dbg { position: absolute; left: 0; bottom: 0; background: #000; color: #0f0;
+         font: 600 16px/1.45 monospace; padding: 5px 8px; white-space: pre; }
+</style></head>
+<body>
+<div class="screen">
+  <div class="statusbar"></div>
+  <!-- 页眉：固定 = 今天（10/9），**不跟选中日走** -->
+  <div class="appbar" id="appbar"><div><div class="t">日程</div><div class="m">10月9日 周五</div></div><div style="font-size:34px;color:#333">⚙</div></div>
+
+  <div class="schedwrap">
+    <div class="schcal">
+      <div class="monthbar">
+        <div class="mv">2026 年 10 月</div>
+        <div class="mbtn"><div class="ar l"></div></div>
+        <div class="mbtn"><div class="ar r"></div></div>
+        <div class="mbtn">今天</div>
+      </div>
+      <div class="cal">
+        <div class="wk"><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span></div>
+        <div class="days" id="days"></div>
+      </div>
+    </div>
+
+    <div class="schbody" id="body">
+      <!-- 日期头：跟着选中日走（10/17）。不是今天，所以没有「今天」角标 -->
+      <div class="dayh" id="dayh"><div class="d">10月17日 周六</div><div class="r">1 项待办</div></div>
+
+      <div class="apcard day">
+        <div class="aphead"><div class="apico day"></div><div class="aplabel">这天要做什么</div><div class="apdate">10/17</div></div>
+        <div class="apbody">上午把日程页的 42 格月历排完
+下午对着截图量一遍列宽</div>
+      </div>
+      <div class="apcard next">
+        <div class="aphead"><div class="apico next"></div><div class="aplabel">次日准备做什么</div><div class="apdate">10/18</div></div>
+        <div class="apbody ph">顺手把这一天的重点记下来</div>
+      </div>
+
+      <div class="dsec">这天的事项<span class="ln"></span></div>
+      <div class="minirow"><div class="qq" style="background:#d9303c"></div><div class="tt">给客户回电话确认合同细节</div><div class="pp">09:00</div></div>
+    </div>
+  </div>
+
+  <div class="tabbar">
+    <div class="tb">
+      <div class="it"><div class="ic"></div><div class="lb">总览</div></div>
+      <div class="it on"><div class="ic"></div><div class="lb">日程</div></div>
+      <div class="it"><div class="ic"></div><div class="lb">全部</div></div>
+      <div class="it"><div class="ic"></div><div class="lb">我的</div></div>
+    </div>
+  </div>
+
+  <div class="dbg" id="dbg"></div>
+</div>
+<script>
+  // 42 格：与 buildCal() 同一套算法（周一起始、连续 42 天）
+  (function () {
+    var y = 2026, m = 10, today = '2026-10-09', sel = '2026-10-17';
+    var hi = { '2026-10-17': 1, '2026-10-12': 1 };                   // 有带提醒的事项
+    var hp = { '2026-10-11': 1, '2026-10-12': 1, '2026-10-18': 1 };  // 写过计划
+    var lead = (new Date(y, m - 1, 1).getDay() + 6) % 7;
+    var pad = function (n) { return n < 10 ? '0' + n : '' + n; };
+    var host = document.getElementById('days');
+    for (var i = 0; i < 42; i++) {
+      var d = new Date(y, m - 1, 1 - lead + i);
+      var k = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+      var cls = 'dy';
+      if (d.getMonth() !== m - 1) cls += ' other';
+      if (k === today) cls += ' today';
+      if (k === sel) cls += ' sel';
+      var dots = '';
+      if (hi[k]) dots += '<div class="i"></div>';
+      if (hp[k]) dots += '<div class="i q"></div>';
+      host.insertAdjacentHTML('beforeend',
+        '<div class="' + cls + '" data-k="' + k + '"><div class="num">' + d.getDate() +
+        '</div><div class="dt">' + dots + '</div></div>');
+    }
+
+    /* ---------------- 就地审计 ---------------- */
+    var out = [];
+    var scr = document.querySelector('.screen');
+    out.push('屏高 ' + scr.clientHeight + ' / scrollH ' + scr.scrollHeight + ' → ' +
+             (scr.scrollHeight <= scr.clientHeight ? '零溢出 ✓' : '溢出 ✗'));
+
+    // ① 本轮的主验收条件：页眉钉在今天，日期头跟着选中日 —— 两者必须不同
+    var meta = document.querySelector('#appbar .m').textContent.trim();
+    var dayD = document.querySelector('#dayh .d').textContent.trim();
+    out.push('页眉「' + meta + '」→ ' + (meta === '10月9日 周五' ? '今天 ✓' : '✗ 不是今天'));
+    out.push('日期头「' + dayD + '」→ ' + (dayD === '10月17日 周六' ? '选中日 ✓' : '✗ 不对'));
+    out.push('页眉 ≠ 日期头 → ' +
+             (meta !== dayD ? '✓ 页眉没跟着点日历跑（bug 1 的验收条件）' : '✗ 页眉又跟着跑了'));
+
+    // ② 今天那个圈只能有一个，且必须在 9 号上；实心选中圈在 17 号上
+    var todays = document.querySelectorAll('.dy.today');
+    var sels = document.querySelectorAll('.dy.sel');
+    var tK = todays[0] && todays[0].getAttribute('data-k');
+    var sK = sels[0] && sels[0].getAttribute('data-k');
+    out.push('今天圈 ' + todays.length + ' 个（' + tK + '） / 选中圈 ' + sels.length + ' 个（' + sK + '） → ' +
+             (todays.length === 1 && tK === today && sels.length === 1 && sK === sel
+               ? '两个圈各就各位 ✓' : '✗'));
+
+    // ③ 7 等分：min-width:auto 没清干净的话，长内容会把某一列顶宽
+    var dys = [].slice.call(document.querySelectorAll('.dy'));
+    var ws = dys.map(function (e) { return Math.round(e.getBoundingClientRect().width * 10) / 10; });
+    var min = Math.min.apply(null, ws), max = Math.max.apply(null, ws);
+    var rows = Math.round(document.querySelector('.days').getBoundingClientRect().height / 76);
+    out.push('格子 ' + dys.length + ' 个 / ' + rows + ' 行   列宽 ' + min + '~' + max +
+             ' → ' + (max - min <= 0.5 ? '7 等分 ✓' : '不等分 ✗'));
+
+    // ④ 首格必须是周一
+    var first = dys[0].getAttribute('data-k');
+    var fw = ['日', '一', '二', '三', '四', '五', '六'][new Date(
+      +first.slice(0, 4), +first.slice(5, 7) - 1, +first.slice(8, 10)).getDay()];
+    out.push('首格 ' + first + '（周' + fw + '）' + (fw === '一' ? ' ✓' : ' ✗'));
+
+    // ⑤ 圆点是否居中于格子
+    var off = 0;
+    [].slice.call(document.querySelectorAll('.dy .dt')).forEach(function (dt) {
+      var cell = dt.parentNode.getBoundingClientRect();
+      var box = dt.getBoundingClientRect();
+      if (box.width > 0) {
+        var dd = Math.abs((box.left + box.width / 2) - (cell.left + cell.width / 2));
+        if (dd > off) off = Math.round(dd * 10) / 10;
+      }
+    });
+    out.push('圆点最大偏心 ' + off + 'px → ' + (off <= 1 ? '居中 ✓' : '偏心 ✗'));
+
+    // ⑥ 日历固定：schcal 的底边必须在折叠线之上，且 schbody 能滚
+    //    ⚠️ 这里不能直接断言「可滚」：内容少于容器时本来就滚不动，
+    //       那不是缺陷。要报的只有「内容溢出了却滚不动」。
+    var cal = document.querySelector('.schcal').getBoundingClientRect();
+    var body = document.getElementById('body');
+    var fits = body.scrollHeight <= body.clientHeight;
+    var scrollable = getComputedStyle(body).overflowY === 'auto';
+    out.push('日历底 ' + Math.round(cal.bottom) + 'px   事项区 ' +
+             (fits
+               ? '内容 ' + body.scrollHeight + ' ≤ 容器 ' + body.clientHeight + '，不需要滚 ✓'
+               : scrollable
+                 ? '可滚（内容 ' + body.scrollHeight + ' > 容器 ' + body.clientHeight + '）✓'
+                 : '✗ 内容溢出却滚不动'));
+
+    // ⑦ 色条：两张卡各自的左条颜色
+    var bars = [].slice.call(document.querySelectorAll('.apcard')).map(function (c) {
+      return getComputedStyle(c, '::before').backgroundColor;
+    });
+    out.push('计划卡色条 ' + (bars[0] === 'rgb(217, 48, 60)' ? 'day 红 ✓' : 'day ✗ ' + bars[0]) + ' / ' +
+             (bars[1] === 'rgb(37, 99, 235)' ? 'next 蓝 ✓' : 'next ✗ ' + bars[1]));
+
+    var tabs = [].slice.call(document.querySelectorAll('.tb .it .lb')).map(function (e) { return e.textContent; });
+    out.push('Tab ' + tabs.join(' ') + '   底边 ' +
+             Math.round(document.querySelector('.tabbar').getBoundingClientRect().bottom));
+    document.getElementById('dbg').textContent = out.join('\n');
+  })();
+</script>
+</body></html>

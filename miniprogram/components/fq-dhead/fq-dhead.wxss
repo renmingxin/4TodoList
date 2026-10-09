@@ -1,0 +1,89 @@
+/* components/fq-dhead/fq-dhead.wxss
+   详情页顶部导航（颜色随象限）
+   规则原在 pages/index/index.wxss 里，整段搬来、一字未改。
+   共享资产（自绘图标 .ico-* / 象限图标 .qmark / 按钮 .btn*）留在 app.wxss，
+   靠 styleIsolation: apply-shared 生效 —— 所以这里只有本组件自己的骨架。
+   ============================================================== */
+
+/* ---------------- 详情页顶部导航（颜色随象限） ---------------- */
+
+.dhead {
+  flex: 0 0 auto;
+  padding: 4rpx 32rpx 36rpx;
+  color: #fff;
+}
+
+.dhead .bar {
+  height: 88rpx;
+  display: flex;
+  align-items: center;
+}
+
+.dhead .bar .h3 {
+  flex: 1;
+  min-width: 0;
+  font-size: 32rpx;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin: 0 12rpx;
+}
+
+.dhead .bar-btn {
+  width: 60rpx;
+  height: 60rpx;
+  flex: 0 0 60rpx;
+  border-radius: 18rpx;
+  background: rgba(255, 255, 255, 0.16);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+}
+
+.dhead .big {
+  font-size: 68rpx;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  margin-top: 12rpx;
+  font-variant-numeric: tabular-nums;
+}
+
+.dhead .cap {
+  display: block;
+  font-size: 23rpx;
+  margin-top: 8rpx;
+  color: #fff;
+}
+
+.dhead .hintpill {
+  display: inline-block;
+  font-size: 20rpx;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  padding: 6rpx 16rpx;
+  border: 2rpx solid rgba(255, 255, 255, 0.5);
+  border-radius: 999rpx;
+  margin-top: 18rpx;
+}
+
+/* 「图标 + 象限性质胶囊」一行。图标与总览页共用 .qmark（同尺寸 56rpx），
+   到了这里只需要补一个跟胶囊之间的间距。
+   ⚠️ .hintpill 的 margin-top:18rpx 是它「独占一行」时的上方间距，
+   进了 flex 行必须清掉 —— 否则胶囊在行内被顶偏、整行高度虚高一截。 */
+.dhead .dmeta {
+  display: flex;
+  align-items: center;
+  margin-top: 6rpx;
+}
+
+.dhead .dmeta .qmark {
+  margin-right: 16rpx;
+}
+
+.dhead .dmeta .hintpill {
+  margin-top: 0;
+}

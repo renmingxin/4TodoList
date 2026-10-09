@@ -1,0 +1,60 @@
+/* components/fq-stats/fq-stats.wxss
+   统计条（总览 / 我的共用）
+   规则原在 pages/index/index.wxss 里，整段搬来、一字未改。
+   共享资产（自绘图标 .ico-* / 象限图标 .qmark / 按钮 .btn*）留在 app.wxss，
+   靠 styleIsolation: apply-shared 生效 —— 所以这里只有本组件自己的骨架。
+   ============================================================== */
+
+/* ---------------- 统计条 ---------------- */
+
+.stats {
+  flex: 0 0 auto;
+  height: 112rpx;
+  padding: 24rpx 32rpx 0;
+  display: flex;
+}
+
+.stat {
+  flex: 1;
+  min-width: 0;
+  background: #fff;
+  border: 2rpx solid var(--line);
+  border-radius: 20rpx;
+  padding: 12rpx 8rpx;
+  text-align: center;
+  margin-right: 12rpx;
+  /* ⚠️ text-align:center 只管左右。上下方向：.stat 是 flex item，默认 stretch
+     会被拉到 .stats 的整高，而「数字 + 标题」只有 62rpx ——
+     总览页 .stats 有 24rpx 上内边距，垫得刚刚好，看不出来；
+     「我的」页 .stats.flat 把内边距清零，多出来的 26rpx 全落在下面，
+     整块就贴顶了，看着没有上下居中。
+     改用纵向 flex 居中：不再依赖外层内边距刚好凑够高度，两种视图都对。 */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.stat:last-child {
+  margin-right: 0;
+}
+
+.stat .v {
+  font-size: 30rpx;
+  font-weight: 600;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat .k {
+  font-size: 20rpx;
+  line-height: 1.3;
+  color: var(--ink3);
+}
+
+/* 我的页复用同一个统计条组件，只是去掉外层留白 */
+.stats.flat {
+  padding: 0;
+  margin-bottom: 24rpx;
+}
+

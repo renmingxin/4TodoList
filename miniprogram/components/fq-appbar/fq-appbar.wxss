@@ -1,0 +1,54 @@
+/* components/fq-appbar/fq-appbar.wxss
+   顶部应用栏（总览 / 全部 / 我的）
+   规则原在 pages/index/index.wxss 里，整段搬来、一字未改。
+   共享资产（自绘图标 .ico-* / 象限图标 .qmark / 按钮 .btn*）留在 app.wxss，
+   靠 styleIsolation: apply-shared 生效 —— 所以这里只有本组件自己的骨架。
+   ============================================================== */
+
+/* ---------------- 顶部应用栏（总览 / 全部 / 我的） ---------------- */
+
+.appbar {
+  flex: 0 0 auto;
+  height: 88rpx;
+  padding: 0 32rpx;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.appbar-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.appbar .h2 {
+  font-size: 42rpx;
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.015em;
+}
+
+.appbar .meta {
+  display: block;
+  font-size: 22rpx;
+  line-height: 2.2;
+  color: var(--ink3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 顶栏右侧图标按钮（避让胶囊：right 由 capsuleReserve 在内联 style 上给） */
+.iconbtn {
+  width: 64rpx;
+  height: 64rpx;
+  flex: 0 0 64rpx;
+  border-radius: 20rpx;
+  border: 2rpx solid var(--line);
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink2);
+}
+

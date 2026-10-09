@@ -1,0 +1,22 @@
+<!-- components/fq-dhead/fq-dhead.wxml
+     详情页顶部导航（颜色随象限）
+     从 pages/index/index.wxml 整段搬来。结构一字未改 —— 只有挂在根上的
+     wx:if 挪到了组件标签上（「该不该出现」是页面的事，不是组件的事）。 -->
+    <view class="dhead {{quad}}">
+      <view class="bar" style="padding-right:{{capsuleReserve}}px">
+        <view class="bar-btn" bindtap="onBack"><view class="ico ico-chev-l"></view></view>
+        <view class="h3">{{quadName}}</view>
+        <view class="bar-btn {{sortMode?'lock':''}}" bindtap="onQuadMenu">
+          <view class="ico ico-dots"><view class="d"></view><view class="d"></view><view class="d"></view></view>
+        </view>
+      </view>
+      <!-- 图标 + 象限性质胶囊一行，数字与「项待办」说明在其下。
+           图标与总览页共用同一个 .qmark，靠 .dhead.q1 这类祖先类选字形。 -->
+    <view class="dmeta">
+      <!-- 与总览矩阵共用同一个 .qmark；象限键挂在元素上，见 app.wxss -->
+      <view class="qmark {{quad}}"></view>
+      <view class="hintpill">{{quadHint}}</view>
+    </view>
+      <view class="big num">{{quadUndone}}</view>
+      <text class="cap">{{quadCap}}</text>
+    </view>

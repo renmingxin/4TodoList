@@ -1,0 +1,15 @@
+<!-- components/fq-fab/fq-fab.wxml
+     悬浮新建（总览页 · 「不重要也不紧急」那一格的右下角）
+     从 pages/index/index.wxml 整段搬来。结构一字未改 —— 只有挂在根上的
+     wx:if 挪到了组件标签上（「该不该出现」是页面的事，不是组件的事）。
+     2026-10-09：根节点上原本还挂着一句内联样式，bottom 由页面按「tab 高 +
+     安全区」算成 px 传进来。按钮挪进 .ovgrid 之后偏移量成了常数，
+     这个入参就退休了 —— 位置回到 wxss，和 width / right 放在一起。
+     （写注释时别直接抄插值语法的片段：mp-check 是文本匹配的，
+       会被自己人的注释骗到 —— 这句话本身就让 bottom 报过一次假警报。）
+     「只在总览页出现」现在由宿主保证（它挂在 .ovbody 里，而那层本来就
+     受 view==='overview' 管），组件自己不再关心。 -->
+  <!-- ============ 悬浮新建（仅总览） ============ -->
+  <view class="fab" bindtap="onNew">
+    <view class="ico ico-plus big"></view>
+  </view>

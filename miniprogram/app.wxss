@@ -62,3 +62,486 @@ button::after { border: none; }
 .num {
   font-variant-numeric: tabular-nums;
 }
+
+/* ============================================================
+   共享视觉资产：自绘图标集 + 象限图标
+   ------------------------------------------------------------
+   这两块放在 app.wxss 而不是页面 wxss 里，是因为它们是**跨组件的设计系统资产**：
+   自绘图标被顶栏 / 底栏 / 抽屉 / 卡片到处用，象限图标同时被总览矩阵与详情头部用。
+   留在页面 wxss 里，组件就成了「样式寄存在别人家」的状态 ——
+   单看一个组件目录根本看不出它长什么样，而 review 时最费劲的正是这个。
+
+   ⚠️ 自定义组件必须写 options.styleIsolation = 'apply-shared'，
+      否则 app.wxss 里的这些 **class 规则**进不去组件
+      （只有 font / color 这类可继承属性会照常继承进去）。
+      页面的 view,text,button… 这类标签选择器不受影响，默认就能穿透。
+   ============================================================ */
+
+/* ---------------- 象限图标（白圆底 + 同象限色字形） ----------------
+   字形用**内联 SVG 的 data URI 背景图**，不是 <image> 加载 .svg 文件 ——
+   后者在 Android 上不可靠（原因见下面图标段），而 data URI 不经过文件协商，
+   WebView 直接按图片渲染，稳。而且一个元素画完，没有内层 <view>，
+   也就没有「图标内 class 撞页面 class」那类风险。
+   ⚠️ 颜色是**烘焙进 data URI** 的（%23d9303c 这类），不是 currentColor / var(--qc)：
+   矢量图在 data URI 里是一份独立文档，拿不到外部 CSS 变量。
+   所以以后改上面的四象限色，必须同步改下面 4 条 URL 里的色值。
+
+   ⚠️ 字形用**复合类**选（.qmark.q1），不用后代类（.q1 .qmark）——
+   图标现在住在自定义组件里，而 .q1 这个祖先在组件外面，
+   跨组件边界的后代匹配能不能成立要看端上的样式隔离怎么实现，不值得赌。
+   把象限键直接挂在图标元素上就没有这个问题：
+     总览矩阵 <view class="qmark {{item.key}}"></view>
+     详情头部 <view class="qmark {{quad}}"></view>
+
+   56rpx 圆 = 28px（≈ 设计稿 28px 圆），字形 32rpx 居中；
+   flex-basis 必须跟 width 一起写，否则作为 flex item 时宽仍是默认值
+   （改自绘图标尺寸时必须连 flex-basis 一起改）。 */
+.qmark {
+  flex: 0 0 56rpx;
+  width: 56rpx;
+  height: 56rpx;
+  border-radius: 50%;
+  background-color: #fff;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 32rpx 32rpx;
+}
+
+.qmark.q1 {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23d9303c' d='M13.5.67s.74 2.65.74 4.8c0 2.06-1.35 3.73-3.41 3.73-2.07 0-3.63-1.67-3.63-3.73l.03-.36C5.21 7.51 4 10.62 4 14c0 4.42 3.58 8 8 8s8-3.58 8-8C20 8.61 17.41 3.8 13.5.67zM11.71 19c-1.78 0-3.22-1.4-3.22-3.14 0-1.62 1.05-2.76 2.81-3.12 1.77-.36 3.6-1.21 4.62-2.58.39 1.29.59 2.65.59 4.04 0 2.65-2.15 4.8-4.8 4.8z'/%3E%3C/svg%3E");
+}
+
+.qmark.q2 {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%239e6c00' d='M14 2 5 13h6l-1 9 9-11h-6l1-9z'/%3E%3C/svg%3E");
+}
+
+.qmark.q3 {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cellipse cx='12' cy='8.8' rx='6.3' ry='6.6' fill='%23c04e18'/%3E%3Crect x='9.3' y='15.2' width='5.4' height='2.4' rx='1.2' fill='%23c04e18'/%3E%3Crect x='10.2' y='18.6' width='3.6' height='2' rx='1' fill='%23c04e18'/%3E%3C/svg%3E");
+}
+
+.qmark.q4 {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%236b7280' d='M4 10.2h11v4.4a4.4 4.4 0 0 1-4.4 4.4h-2.2A4.4 4.4 0 0 1 4 14.6z'/%3E%3Cpath fill='none' stroke='%236b7280' stroke-width='1.7' d='M15.4 11.6h1.5a2.5 2.5 0 0 1 0 5h-1.5'/%3E%3Cpath fill='none' stroke='%236b7280' stroke-width='1.6' stroke-linecap='round' d='M8.2 4.6c.9 1-.8 1.8.1 2.9M11.4 4.6c.9 1-.8 1.8.1 2.9'/%3E%3C/svg%3E");
+}
+
+/* ---------------- 自绘图标（不用 svg 文件，避开 Android 兼容问题） ---------------- */
+
+.ico {
+  display: block;
+}
+
+.ico-grid {
+  width: 38rpx;
+  height: 38rpx;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6rpx;
+}
+
+.ico-grid .c {
+  border: 3rpx solid currentColor;
+  border-radius: 7rpx;
+}
+
+.ico-list {
+  width: 38rpx;
+  height: 30rpx;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.ico-list .c {
+  height: 3rpx;
+  border-radius: 2rpx;
+  background: currentColor;
+}
+
+.ico-list .c.short { width: 64%; }
+
+/* 拖动手柄里的三横线抓手（自绘，与其它图标同一套做法）。
+   ⚠️ 必须写在这里（.ico 之后）：.ico 也是 display:block，同权重下靠先后定胜负，
+   放前面会被它盖掉，flex 布局失效、三根线挤成一坨。 */
+.ico-drag {
+  width: 30rpx;
+  height: 24rpx;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.ico-drag .c {
+  height: 4rpx;
+  border-radius: 2rpx;
+  background: currentColor;
+}
+
+.ico-user {
+  width: 40rpx;
+  height: 40rpx;
+}
+
+.ico-user .h {
+  width: 16rpx;
+  height: 16rpx;
+  border: 3rpx solid currentColor;
+  border-radius: 50%;
+  margin: 0 auto;
+}
+
+.ico-user .b {
+  width: 32rpx;
+  height: 15rpx;
+  border: 3rpx solid currentColor;
+  border-bottom: 0;
+  border-radius: 18rpx 18rpx 0 0;
+  margin: 4rpx auto 0;
+}
+
+/* 日历（日程 Tab）。结构 = 外框 + 表头横杠 + 一个「今天」的点，
+   全部由元素自身与两个伪元素承担，**不引子元素** ——
+   图标内层一旦出现 <view class="x">，那个 x 就有机会撞上页面级同名 class
+   （.ico-trash 的桶身撞过 .body，桶身被撑宽 70rpx、整体右偏 21rpx，
+   而 .workbuddy/tools/class-collision.js 就是为这条建的）。
+   两个伪元素的位置都以 padding box 为基准：border 是 3rpx，
+   所以「外扩到边框外沿」写 -3rpx。 */
+.ico-cal {
+  width: 38rpx;
+  height: 34rpx;
+  border: 3rpx solid currentColor;
+  border-radius: 8rpx;
+  position: relative;
+}
+
+.ico-cal::before {          /* 表头：左右外扩 3rpx 盖住边框，看着是一条通栏 */
+  content: '';
+  position: absolute;
+  left: -3rpx;
+  right: -3rpx;
+  top: 4rpx;
+  height: 6rpx;
+  background: currentColor;
+}
+
+.ico-cal::after {           /* 「今天」那个点。居中用 calc，不写死 rpx */
+  content: '';
+  position: absolute;
+  left: calc(50% - 4rpx);
+  top: 15rpx;
+  width: 8rpx;
+  height: 8rpx;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.ico-chev-l,
+.ico-chev-r {
+  width: 14rpx;
+  height: 14rpx;
+  border-top: 3rpx solid currentColor;
+  border-right: 3rpx solid currentColor;
+}
+
+.ico-chev-l { transform: rotate(-135deg); }
+.ico-chev-r { transform: rotate(45deg); }
+
+.ico-check {
+  width: 12rpx;
+  height: 22rpx;
+  border-bottom: 4rpx solid currentColor;
+  border-right: 4rpx solid currentColor;
+  transform: rotate(45deg);
+  margin-bottom: 6rpx;
+}
+
+/* 撤销：左向箭头（三角箭头 + 尾杆），一个元素两个伪元素画完。
+   纵向占位 16 + margin-bottom 12 = 28rpx，与 .ico-check（22 + 6）**相等**——
+   两者是同一个按钮的两种状态，占位不同的话，点「完成」变「撤销」的瞬间
+   图标和文字会整体上下跳一下。 */
+.ico-undo {
+  width: 30rpx;
+  height: 16rpx;
+  position: relative;
+  margin-bottom: 12rpx;
+}
+
+.ico-undo::before {            /* 三角箭头 */
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  border-top: 8rpx solid transparent;
+  border-bottom: 8rpx solid transparent;
+  border-right: 11rpx solid currentColor;
+}
+
+.ico-undo::after {             /* 尾杆（与箭头根部重叠 2rpx，不留接缝） */
+  content: "";
+  position: absolute;
+  left: 9rpx;
+  right: 0;
+  top: 6rpx;
+  height: 4rpx;
+  border-radius: 2rpx;
+  background: currentColor;
+}
+
+.ico-plus {
+  width: 28rpx;
+  height: 28rpx;
+  position: relative;
+  flex: 0 0 28rpx;
+}
+
+.ico-plus::before,
+.ico-plus::after {
+  content: "";
+  position: absolute;
+  background: currentColor;
+  border-radius: 2rpx;
+}
+
+/* 十字用百分比居中，不再写死 top/left 的绝对 rpx。
+   原来 .big/.sm 只覆盖了 width/height，没覆盖基类的 flex:0 0 28rpx，
+   于是这个 flex item 的「宽」永远是 28rpx、「高」却是 44rpx：
+   横杠撑满 28rpx，竖杠按 44rpx 的盒子 left:20rpx 定位 → 竖杠跑到横杠右端，
+   看起来是个「†」而不是「＋」（实测竖杠中心比按钮中心偏 6px）。 */
+.ico-plus::before {
+  left: 0;
+  right: 0;
+  top: calc(50% - 2rpx);
+  height: 4rpx;
+}
+
+.ico-plus::after {
+  top: 0;
+  bottom: 0;
+  left: calc(50% - 2rpx);
+  width: 4rpx;
+}
+
+/* FAB 里的大号加号（flex-basis 必须跟着尺寸一起改，否则又会被压回 28rpx） */
+.ico-plus.big {
+  width: 44rpx;
+  height: 44rpx;
+  flex: 0 0 44rpx;
+}
+
+/* 主按钮里的小号加号 */
+.ico-plus.sm {
+  width: 30rpx;
+  height: 30rpx;
+  flex: 0 0 30rpx;
+}
+
+/* 垃圾桶：一个元素 + 两个伪元素画完，不再用内层 <view class="body">。
+   ⚠️ 踩过的坑：内层那个 class="body" 会同时命中页面级的 .body（滚动内容的内边距
+   容器：.body{padding:24rpx 32rpx 0}）。绝对定位时左右 padding 相加 64rpx，
+   远大于原定的 22rpx 宽，桶身被撑到约 68rpx 并整体右移 —— 实测桶身中心比按钮中心
+   偏右约 21rpx，而桶盖（类名 .lid，没有同名冲突）却是正的，看上去就是
+   「删除图标不居中」。
+   规矩：图标内部不要用会和页面 class 重名的名字；定位一律
+   「显式 width + left:calc(50% - w/2)」，不写 left/right 对。 */
+.ico-trash {
+  width: 32rpx;
+  height: 34rpx;
+  position: relative;
+}
+
+.ico-trash::before {          /* 桶盖 */
+  content: "";
+  position: absolute;
+  top: 0;
+  left: calc(50% - 16rpx);
+  width: 32rpx;
+  height: 3rpx;
+  border-radius: 2rpx;
+  background: currentColor;
+}
+
+.ico-trash::after {           /* 桶身 */
+  content: "";
+  position: absolute;
+  top: 8rpx;
+  bottom: 0;
+  left: calc(50% - 12rpx);
+  width: 24rpx;
+  box-sizing: border-box;
+  border: 3rpx solid currentColor;
+  border-top: 0;
+  border-radius: 0 0 6rpx 6rpx;
+}
+
+.ico-dots {
+  width: 30rpx;
+  height: 8rpx;
+  display: flex;
+  justify-content: space-between;
+}
+
+.ico-dots .d {
+  width: 7rpx;
+  height: 7rpx;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.ico-sliders {
+  width: 32rpx;
+  height: 26rpx;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.ico-sliders .sl {
+  height: 3rpx;
+  border-radius: 2rpx;
+  background: currentColor;
+  position: relative;
+}
+
+.ico-sliders .kn {
+  position: absolute;
+  top: -4rpx;
+  width: 11rpx;
+  height: 11rpx;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* 排序入口图标：上下两个尖角 = ⇅ */
+.ico-sort {
+  width: 22rpx;
+  height: 30rpx;
+  position: relative;
+  flex: 0 0 22rpx;
+}
+
+.ico-sort .c {
+  position: absolute;
+  left: calc(50% - 7rpx);
+  width: 14rpx;
+  height: 14rpx;
+  box-sizing: border-box;
+  border-top: 3rpx solid currentColor;
+  border-right: 3rpx solid currentColor;
+}
+
+.ico-sort .c.up {
+  top: 2rpx;
+  transform: rotate(-45deg);
+}
+
+.ico-sort .c.dn {
+  bottom: 2rpx;
+  transform: rotate(135deg);
+}
+
+
+
+/* ---------------- 共享按钮（底部主按钮 / 抽屉保存键共用） ----------------
+   原来长在「底部主按钮」那一节里，但它其实被两处用：底栏的 .btn.dark
+   与抽屉保存键的 .btn.primary。跟着搬进 fq-bottombar 就成了
+   「抽屉的按钮样式寄存在底栏组件里」，所以上提到全局：
+   基础形态（高 88rpx / 圆角 24rpx / 居中）+ 两个配色变体。 */
+
+.btn {
+  width: 100%;
+  height: 88rpx;
+  border-radius: 24rpx;
+  font-size: 28rpx;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn .ico-plus {
+  margin-right: 14rpx;
+}
+
+.btn.primary { background: var(--blue); color: #fff; }
+.btn.dark { background: var(--ink); color: #fff; }
+
+
+/* ---------------- 共享：进度条（今日饮水 / 事项进度） ----------------
+   这两个进度条是**同一条控件**，规格本来就一模一样（饮水卡那边甚至早就写着
+   「圆点：白底 + 蓝描边，与待办进度条同一规格」）。原先整套长在 fq-water.wxss 里，
+   那时只有饮水一个用户；事项进度条一来就有了第二个用户，于是按本项目的惯例
+   上提到全局 —— 两边读同一份规格，改厚度只需改一处，不会出现
+   「饮水的条比事项的粗一点」这种谁都不会报错的漂移。
+
+   ⚠️ 颜色由宿主给：填充与圆点描边读 `var(--wt)`，宿主在自己那层定义它
+      （饮水卡定义 --wt/--wt-d，事项卡片定义成所属象限色 / 完成绿）。
+      共享资产不认识任何具体颜色 —— 正因为它不认识，两个语境才能共用。
+
+   ⚠️ 这里**刻意不写 touch-action: none**。它是「别把这串 touch 判成页面滚动」
+      的第二道保险，代价是那一块区域再也滚不动：饮水卡挂在总览页（整页本来
+      就不滚）上无所谓，事项卡片却长在长列表里，写了就等于每张卡片底部
+      多出一条按着滑不动的死区。所以这条策略留给宿主自己声明。
+
+   ⚠️ `w` 前缀是历史：这套类最早长在饮水卡（water）里，上提时保留了原名。
+      改名要同时动 fq-water 的 wxml 与两个 wxss，而买不到任何东西 ——
+      这几个类名在全局是唯一的，撞不了车。 */
+
+.wtrack {
+  position: relative;
+  height: 48rpx;        /* 触区 24px：手指落点要容错，不要求对准 14rpx 的细线 */
+  display: flex;
+  align-items: center;
+}
+
+.wbar {
+  position: relative;
+  flex: 1;
+  height: 14rpx;
+  border-radius: 8rpx;
+  background: #dfe5ec;
+  transition: background 0.2s;
+}
+
+.wfill {
+  height: 100%;
+  border-radius: 8rpx;
+  background: var(--wt, var(--ink3));
+  transition: background 0.25s;
+}
+
+/* 圆点：白底 + 彩色描边，两者缺一不可 ——
+   只留白底，落在灰轨道上就消失了（白 vs #dfe5ec 仅 1.2:1）；
+   只留描边，压在有色填充上时边界又会糊在一起。
+   left 用百分比 + 负 margin，让这个百分比表示的是**圆心**而不是左边缘。
+   ⚠️ 代价是 0% 与 100% 时圆点各有一半悬在轨道外 —— 那正是「到头了」的提示，
+      所以承载它的 .wbar 不能写 overflow:hidden。 */
+.wknob {
+  position: absolute;
+  top: 50%;
+  width: 32rpx;
+  height: 32rpx;
+  margin: -16rpx 0 0 -16rpx;
+  border-radius: 50%;
+  background: #fff;
+  border: 5rpx solid var(--wt, var(--ink3));
+  box-shadow: 0 2rpx 8rpx rgba(16, 18, 22, 0.24);
+  transition: transform 0.12s ease, border-color 0.25s ease;
+}
+
+/* 按住时：轨道底色加深 + 圆点放大 1.24×。两处变化只说明一件事：这一下抓稳了。
+   宿主只要在按住期间给 .wtrack 挂上 .on（饮水卡是 wdrag 为真时挂）。 */
+.wtrack.on .wbar { background: #d3dae3; }
+.wtrack.on .wknob { transform: scale(1.24); }
+
+
+/* ================= 共享：排序模式「锁住」 =================
+   .lock 挂上去 = 看得见、点不动。详情页头部的 ⋮（fq-dhead）与筛选条
+   （fq-filters）都要用，而它们各自是独立组件、样式不互通，所以定义上提到这里。
+   app.wxss 的 class 规则能进组件 —— 这是官方文档对 apply-shared / addGlobalClass
+   的明确语义（示例里就是 app.wxss 定义 .red-text、组件模板直接用），不是碰巧。 */
+
+/* 排序模式下被「锁住」的区域：看得见、点不动 */
+.lock {
+  pointer-events: none;
+  opacity: 0.4;
+}

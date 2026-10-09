@@ -1,0 +1,143 @@
+/* components/fq-water/fq-water.wxss
+   今日饮水卡（总览页 · 矩阵下方）
+   ============================================================
+   换算：设计稿 water-tracker 的 px × 2 = rpx（750rpx = 屏宽）。
+   圆角/描边与页面已有的卡片对齐：24rpx 圆角（同 .row）、2rpx 描边（同 .stat）。
+   **卡片自己不写 margin** —— 上下左右都是宿主的排版决定（总览页的 .ovbody 给
+   32rpx 左右内距、.ovwater 给 margin-top）。组件一旦写死 margin，
+   换个位置就会多出一截莫名其妙的空隙。
+   宽度也不设：作为块级元素自然撑满宿主给的宽度（设计稿是「与矩阵同宽」）。
+
+   色值（设计稿规格表，落成局部 token，不动 app.wxss 的全局变量）：
+     饮水蓝   #2E8FE0 —— 只用于填充、圆点描边与 30rpx 数值，**不承载正文**。
+              对白卡 4.08:1：够「非文本 / 大字号」所需的 3:1，不够正文的 4.5:1，
+              所以标题与提示一律走 --ink / --ink3，别把蓝用在小字上。
+     达标深蓝 #1B6DBE —— 对白卡 5.68:1。两个状态之间本就拉开了明度差，
+     再叠上文案变化（还差 N ml → 已达成 ✓），不靠单一颜色传达状态。
+   ============================================================ */
+
+.water {
+  --wt: #2e8fe0;
+  --wt-d: #1b6dbe;
+  background: #fff;
+  border: 2rpx solid var(--line);
+  border-radius: 24rpx;
+  padding: 22rpx 26rpx 24rpx;
+  margin: 0;
+  transition: background 0.25s, border-color 0.25s;
+}
+
+/* 达标态做在**整张卡**上，不是一个 Toast：
+   达标是持续状态 —— 下次打开总览页，应该还能一眼看出今天已经喝够。 */
+.water.full {
+  background: #f3f9ff;
+  border-color: #bfe0fa;
+}
+
+/* ---------------- 首行：图标 + 名称 + 提示 + 读数 ---------------- */
+
+.wtop {
+  display: flex;
+  align-items: center;
+}
+
+/* 水滴图标：浅蓝圆底 + 同色字形，达标时整体切成「深蓝底 + 白字形」。
+   ⚠️ 颜色是烘焙进 data URI 的（%232e8fe0 / %23ffffff），拿不到 var() 或 currentColor
+   —— 一个状态一条 URL。改色时这两处必须一起改（与 app.wxss 的 .qmark 同一个坑）。
+   flex-basis 必须跟 width 一起写，否则作为 flex item 时宽度仍是默认值。 */
+.wic {
+  flex: 0 0 40rpx;
+  width: 40rpx;
+  height: 40rpx;
+  margin-right: 14rpx;
+  border-radius: 50%;
+  background-color: #e8f3fe;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232e8fe0' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 2.7c3.4 4.1 6.5 7.4 6.5 11.1a6.5 6.5 0 0 1-13 0c0-3.7 3.1-7 6.5-11.1z'/%3E%3C/svg%3E");
+  background-size: 24rpx 24rpx;
+  background-repeat: no-repeat;
+  background-position: center;
+  transition: background-color 0.25s;
+}
+
+.water.full .wic {
+  background-color: var(--wt);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ffffff' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 2.7c3.4 4.1 6.5 7.4 6.5 11.1a6.5 6.5 0 0 1-13 0c0-3.7 3.1-7 6.5-11.1z'/%3E%3C/svg%3E");
+}
+
+.wname {
+  margin-right: 14rpx;
+  font-size: 26rpx;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+/* 提示文案：未达标是灰色的「还差 N ml」，达标转深蓝加粗。
+   它是「颜色之外的第二条线」——不靠颜色也能读出状态。 */
+.whint {
+  font-size: 21rpx;
+  color: var(--ink3);
+  white-space: nowrap;
+  transition: color 0.25s;
+}
+
+.water.full .whint {
+  color: var(--wt-d);
+  font-weight: 600;
+}
+
+/* 读数靠右。margin-left:auto 把它推到行尾，不依赖 flex gap（旧 Android 对 gap 不可靠）。 */
+.wval {
+  margin-left: auto;
+  font-size: 22rpx;
+  color: var(--ink3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.wval .wv {
+  margin-right: 2rpx;
+  font-size: 30rpx;
+  font-weight: 600;
+  color: var(--wt);
+}
+
+.water.full .wval .wv {
+  color: var(--wt-d);
+}
+
+/* ---------------- 轨道 ----------------
+   轨道 / 横杆 / 填充 / 圆点这四件已**上提到 app.wxss 共享**（见那里的长注释）：
+   饮水卡与事项进度条是同一条控件，规格本就一致。这里只留本卡自己的两件事 ——
+   它在版面里的位置，以及它的滚动策略。 */
+
+.water .wtrack {
+  margin-top: 14rpx;
+  /* 横向拖动不要被判成页面滚动。catchtouch* 是第一道保险，
+     这是第二道（部分端在 touch 阶段先看 touch-action）。
+     ⚠️ 这一条只属于总览页：那一屏本来就不滚，禁掉 touch-action 没有代价。
+        事项卡片长在长列表里，照抄会让卡片底部多出一条按着滑不动的死区，
+        所以 app.wxss 里刻意没写它，那边也不写。 */
+  touch-action: none;
+}
+
+.water.full .wfill {
+  background: var(--wt-d);
+}
+
+/* 刻度：3 道白线，落在 25% / 50% / 75%（即 500 / 1000 / 1500 ml）。
+   ⚠️ 位置是写死的百分比，改了 WATER_GOAL（utils/const.js）要同步改这 3 个 left。 */
+.wtick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 3rpx;
+  background: #fff;
+  opacity: 0.92;
+}
+
+/* 圆点本体（白底 + 彩色描边）与「按住放大 1.24×」都在 app.wxss 的共享块里，
+   这里只剩达标态换深蓝这一条本卡专属的覆盖。 */
+.water.full .wknob {
+  border-color: var(--wt-d);
+}

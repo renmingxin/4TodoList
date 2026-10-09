@@ -12,7 +12,7 @@
 
 ## 一、跑起来
 
-### 1. 建五个集合
+### 1. 建六个集合
 
 微信开发者工具 → 云开发 → 数据库 → 新建集合：
 
@@ -23,8 +23,9 @@
 | `fq_categories` | 分类（工作 / 生活 / 自建） |
 | `fq_items` | 事项 |
 | `fq_subs` | 提醒推送额度（**每人一条**：攒了几条、还能发几条） |
+| `fq_plans` | 日程计划（**每人一条/每天一条**：今天要做什么、明天准备做什么） |
 
-五个集合的**权限都设为「仅创建者可读写」**。
+六个集合的**权限都设为「仅创建者可读写」**。
 客户端不直接读数据库，所有读写都走云函数；这条规则是防止有人绕过云函数直连。
 
 > ⚠️ 「仅创建者可读写」对云函数**不起作用** —— 云函数用的是管理员权限，会绕过安全规则。
@@ -52,8 +53,8 @@
 
 #### 版本握手（防这个坑的第二道闸）
 
-`cloudfunctions/fqTodo/index.js` 和 `miniprogram/pages/index/index.js` 里各有一份
-`FN_VER`（当前 **5**），必须**始终相等**。云函数 `bootstrap` 会把 `fnVer` 和
+`cloudfunctions/fqTodo/index.js` 和 `miniprogram/utils/const.js` 里各有一份
+`FN_VER`（当前 **7**），必须**始终相等**。云函数 `bootstrap` 会把 `fnVer` 和
 `actions` 清单一起返回，小程序首屏拿它对一下：
 
 - 版本一致 → 静默；
@@ -63,10 +64,18 @@
 **约定：只要改动云函数的 action 清单（新增 / 删除 / 改签名），两边 `FN_VER` 一起 +1。**
 只改一边的话握手就白做了——`test-reorder.js` 第 [17] 组会读两份源码比对，漏改会红。
 
+> ⚠️ **没有新增 action 也要 +1。** 版本号钉的是「云端认不认得客户端发过来的字段」，
+> 不只是 action 清单。`v7` 就是这么来的：进度条一个 action 都没加，但旧云函数不认识
+> `progress`（白名单写法会把它悄悄丢掉），客户端拖完看着生效、一刷新全回 0% ——
+> 又是一次「拖了才知道」的静默故障，正是握手要提前拦住的那一类。
+
 > v2 → v3：引入共享家庭，归属键从 `_openid` 变成 `fid`。
 > v3 → v4：分类支持删除与改名，新增 `removeCategory` / `renameCategory`。
 > v4 → v5：提醒推送，新增 `grantSub`（攒订阅额度）；`fq_items` 多出 `pushed` 系列字段，
 > 由独立的 `fqRemind` 定时云函数消费。
+> v5 → v6：日程版块，新增 `savePlan`；`bootstrap` / `sync` 多回一个 `plans` 字段。
+> v6 → v7：事项进度条。`fq_items` 多出 `progress`（0~100），`updateItem` 里多了
+> 「`done` ⟺ `progress === 100`」这条耦合 —— 两者不是两个状态，是同一条状态线的两种读法。
 
 ### 3. 确认环境 ID
 
@@ -89,7 +98,7 @@ env: "cloud1-d0gaaaa6g7f0f1b61",
 | **`未知 action: reorder`**（拖动排序落库时弹出） | 「云端是旧包」：本地云函数已经加了 `reorder`，但没重新上传部署 | 同样是一次**上传并部署**就好。**代码本身没问题**——`test-cloudfn.js` 会拿着假数据库真跑一遍 `fqTodo/index.js`，它绿了就说明问题只在部署 |
 | 首屏弹窗「云函数版本过旧」 | 版本握手发现云端 `fnVer` 缺失或与本地 `FN_VER` 不等，即云函数没重新部署 | 同上。这是**主动预警**，比等你拖一次列表才发现要早 |
 | `云开发环境不存在，请检查 app.js 的 env` | `app.js` 的 env 与实际环境 ID 不符（换过环境或换过账号） | 云开发控制台复制环境 ID，覆盖 `app.js` 的 `env` |
-| `collection not exists` / 提示集合不存在 | 两个集合没建 | 云开发 → 数据库 → 新建 `fq_categories`、`fq_items` |
+| `collection not exists` / 提示集合不存在 | 集合没建全 | 云开发 → 数据库 → 新建缺的那个（§一.1 列了全部六个；只做日程的话至少要 `fq_plans`） |
 
 > 分辨「云函数是旧包」还是「云函数代码本身写错了」：跑
 > `node .workbuddy/tools/check-all.js`。里面的 `test-cloudfn.js` 会在本地把
@@ -120,28 +129,83 @@ cloudfunctions/
 miniprogram/
   app.js                  ← 云开发初始化
   app.json                ← 只注册 pages/index/index
-  app.wxss                ← 设计 token（四象限色 / 中性色 / 功能色）
+  app.wxss                ← 设计 token + 共享视觉资产（自绘图标 / .qmark / 通用按钮）
   sitemap.json
-  pages/index/            ← 全部界面都在这一页（单页状态机）
-    index.wxml            ← 四个视图 + 事项卡片 template + 底部抽屉
-    index.wxss            ← 按设计稿 token 换算的 rpx 样式
-    index.js              ← 视图状态 / 派生数据 / 左滑与拖动排序 / 云调用
-    index.json            ← navigationStyle: custom + disableScroll
+  pages/index/            ← 宿主页（单页状态机：四个视图走内存状态，不走路由）
+    index.wxml            ← 视图骨架 + 事项卡片 template + 底部抽屉
+    index.wxss            ← 页面自己的样式（组件样式在各自目录里）
+    index.js              ← 视图状态 / 派生数据 / 云调用（拖动引擎已搬到 utils/drag.js）
+    index.json            ← navigationStyle: custom + disableScroll + usingComponents
+  components/             ← 13 个展示型组件（virtualHost + apply-shared，见 §二·组件分层）
+    fq-appbar/  fq-cats/    fq-stats/  fq-quad/   fq-water/  fq-dhead/
+    fq-filters/ fq-sortdone/ fq-fab/   fq-bottombar/ fq-tabbar/
+    fq-cal/     fq-plan/    ← 日程：月历 与 计划卡
+  utils/
+    const.js              ← 协议常量（象限 / 尺寸 LAYOUT / FN_VER / 饮水目标…）
+    format.js             ← 纯函数（日期 / 时间戳 / 邀请码文案…）
+    drag.js               ← 拖动排序状态机（Object.assign 进 Page，零行为改动）
+  services/
+    cloud.js              ← 唯一云出口（callCloud + 在途写计数）
 .workbuddy/
-  tools/check-all.js      ← 一条命令跑完下面 4 个（见第五节）
-  tools/mp-check.js       ← 静态契约：class / data / 结构配对
+  tools/check-all.js      ← 一条命令跑完全部（见第五节）
+  tools/arch-check.js     ← 组件化等价性守卫（扁平化 class 序列 + 选择器映射 vs 基线）
+  tools/wxml-flatten.js   ← 把组件就地展开成页面（arch-check 与测试共用）
+  tools/mp-check.js       ← 静态契约：class / data / 结构配对 / 固定头部
+  tools/event-check.js    ← 事件接线契约（组件自带 / 页面自带 / 出口闭合 / 取值形状 / 同名同形）
+  tools/component-audit.js← 组件解析审计（标签注册 / 四个文件齐 / component:true / 标签配平）
   tools/class-collision.js← 图标内部 class 与页面级 class 重名
-  tools/test-reorder.js   ← 页面逻辑仿真（拖动 / 左滑 / 握手）
+  tools/test-reorder.js   ← 页面逻辑仿真（拖动 / 左滑 / 握手 / 一屏装满 / 进度条手势）
+  tools/test-water.js     ← 饮水逻辑仿真（吸附 / 夹紧 / 跨天清零）
+  tools/test-sched.js     ← 日程逻辑仿真（42 格月历 / 跨月跨年 / 圆点口径 / 计划取存）
   tools/fake-cloud.js     ← 两个云函数测试共用的假 wx-server-sdk（内存库 + 云调用记录）
   tools/test-cloudfn.js   ← 云函数逻辑仿真（假数据库真跑 fqTodo）
   tools/test-remind.js    ← 云函数逻辑仿真（真跑 fqRemind：去重 / 额度 / 模板）
   tmp/four-quadrant-mobile.html  ← 设计稿本地快照
 ```
 
-`miniprogram/` 8 个文件 + `cloudfunctions/` 5 个文件。云开发模板自带的 `pages/example`、`components/cloudTipModal`、
-`images/`（32 张）、`envList.js`、`cloudfunctions/quickstartFunctions`、`uploadCloudFunction.sh`
-已全部清理（合计 45 个文件、约 1.2 MB），备份在
-`.workbuddy/tmp/_template-residue-backup/`，确认无碍后可直接删掉这个备份目录。
+云开发模板自带的 `pages/example`、`components/cloudTipModal`、`images/`（32 张）、`envList.js`、
+`cloudfunctions/quickstartFunctions`、`uploadCloudFunction.sh` 已全部清理（合计 45 个文件、约 1.2 MB），
+备份在 `.workbuddy/tmp/_template-residue-backup/`，确认无碍后可直接删掉这个备份目录。
+
+### 组件分层
+
+宿主页 `pages/index` 只留骨架、事项卡片、底部抽屉；其余展示块拆成
+`components/<name>/<name>.{wxml,wxss,js,json}`。每个组件都带两个选项：
+
+```js
+Component({
+  options: {
+    virtualHost: true,               // 组件不产生额外节点（必需，不是优化）
+    styleIsolation: 'apply-shared',  // app.wxss 的共享资产能进组件
+  },
+  properties: { /* 数据只从这里进 */ },
+  methods: { /* 交互只用 triggerEvent 出去 */ },
+});
+```
+
+- **`virtualHost: true` 是必需的**：`.screen` 是纵向 flex，各固定块靠 `flex: 0 0 auto`
+  占住自己的高度；组件一旦产生真实节点就多出一个 flex item，整套布局开始靠运气。
+- **`apply-shared`** 让 `app.wxss` 的共享资产（自绘图标 `.ico-*`、象限图标 `.qmark`、
+  通用按钮 `.btn*`）进得来。官方文档原话：「除继承样式外，`app.wxss` 中的样式、
+  组件所在页面的样式对自定义组件无效（除非更改组件样式隔离选项）」——
+  实测确认：底栏图标只定义在 `app.wxss`，在组件里正常渲染。
+- **数据只走 `properties`，交互只走 `triggerEvent`**。组件不碰 `wx.cloud`、
+  不读写页面实例 —— 这样它才能被单独看懂。
+- **组件内部 handler 保留页面原来的方法名**。WXML 是逐字搬来的（连
+  `bindtap="onX"` 一起），js 是手写的，两边名字没有任何东西保证一致，而且
+  **完全不报错** —— 一次批量抽取曾造出 5 个「点了没反应」的按钮。所以对外的事件名
+  另取（`triggerEvent('pick')`），组件内部沿用原名。这条由 `event-check.js` 守着。
+
+**组件化会造出四类静默故障**（全部不报错，且 arch-check 与逻辑仿真都看不见）：
+
+| 故障 | 现象 | 守卫 |
+|---|---|---|
+| WXML 里的方法名与 js 对不上 | **按钮点了没反应** | `event-check` A / B |
+| 页面 `bind:x` 与组件 `triggerEvent` 不闭合、或取值形状不对 | 按钮没反应 / 拿到 `undefined` | `event-check` C / D |
+| 标签没注册 / 切片把标签切坏 | **一整个区块安静地变空白** | `component-audit` |
+| 新增组件目录后开发者工具只重编译了一半 | 也是整块空白，但磁盘上查不出任何问题 | 全量「编译」(Ctrl+B) → 清缓存 → 重启工具 |
+
+> 结论：**每加一层间接 / 一类文件，都要问「哪条既有检查现在成了盲区」。**
 
 ---
 
@@ -196,8 +260,9 @@ miniprogram/
 | `quad` | string | `q1` / `q2` / `q3` / `q4` |
 | `catId` | string | 所属分类 `_id` |
 | `priority` | number | 1–4，对应卡片上的 P1–P4 标签 |
-| `done` | boolean | |
+| `done` | boolean | **永远等价于 `progress === 100`**，见下面的耦合说明 |
 | `doneBy` | string | 谁勾掉的（openid）。共享清单里「谁完成的」是刚需，顺手就记了 |
+| `progress` | number | 完成进度 0–100 的整数。**和 `done` 是同一条状态线的两种读法**，不是两份数据 |
 | `remindAt` | number \| null | 提醒时间的毫秒时间戳。到点前 10 分钟由 `fqRemind` 推送，详见 §十二 |
 | `pushed` | boolean | 这条提醒**已经被定时任务处理过**（不论发没发出去）。去重全靠它 |
 | `pushedAt` | date \| null | 处理时间 |
@@ -205,6 +270,23 @@ miniprogram/
 | `pushErr` | string | 失败原因（`no-quota` / `expired` / 微信错误码），排查用 |
 | `order` | number | 排序。种子 1000+，新建用 `Date.now()`（天然排到末尾）；一经拖动即整段重写成 `0 / 10 / 20…` |
 | `createdAt` / `updatedAt` / `doneAt` | date | |
+
+**`done` 与 `progress` 为什么必须耦合**：界面上它们是同一根进度条的两种读法 ——
+拖到 100% 就是完成，从 100% 拖回来就是自动撤销。如果放任两者各写各的，就会出现
+「满格的卡片不算完成」「已完成的卡片显示 37%」这类谁也解释不通的状态，而且
+**两边都不会报错**。所以耦合钉在云函数的 `updateItem` 里，客户端说了不算：
+
+- 只传 `progress` → `done` 由它推（`progress >= 100`）；
+- 只传 `done` → `progress` 由它补齐（`true` → 100，`false` → 0）；
+- 两个都传且互相矛盾 → **以 `done` 为准**，`progress` 被纠正成 100 / 0；
+- 落库时统一修正：`done` 为真则 `progress` 落 100，否则落被夹到 0–99 的 `progress`。
+
+`bulk` 的 `markAllDone` 走的是批量路径，同样要写 `progress: 100` ——
+这是最容易漏的一个口子（漏了就会出现一批「已完成但进度 0%」的行）。
+
+**客户端的分工**：`patch` 里**只送一个**字段，不送一对。左滑「完成 / 撤销」只送
+`{ done }`（进度由云函数补），拖进度条只送 `{ progress }`（`done` 由云函数推）。
+两个都送 = 两个真相来源，迟早对不上。
 
 **排序为什么是「整段重写 0/10/20…」**：拖动只改相对顺序，用「相邻两条取中值」会一路把
 浮点间距耗光，几十次拖动后 collapse 就得做重排；整段重写虽然多写几条，但结果确定、
@@ -228,9 +310,30 @@ miniprogram/
 为什么额度不是家庭资产：微信的一次性订阅是**按用户授权**的，一个人点「允许」只买到
 他自己的一条发送权。详见 §十二。
 
+### `fq_plans`
+
+日程计划 —— 第三张**按人**归属的表（前两张是 `fq_members` 与 `fq_subs`）。
+「今天要做什么 / 明天准备做什么」是自己写下的笔记，不是家庭资产。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `fid` | string | 归属家庭。和其它 action 一样**由服务端推导**，不接受客户端传入 |
+| `_openid` | string | 谁写的。**同一个家庭里两位成员写同一天，必须是两条记录** |
+| `date` | string | `YYYY-MM-DD`。**字符级严格校验**：它是唯一键的一部分 |
+| `text` | string | 计划正文，上限 300 字（云函数 `MAX_PLAN` ↔ 客户端 `PLAN_MAX`，成对常量） |
+| `updatedAt` | date | |
+
+唯一键是 `(fid, _openid, date)`，写入是 upsert；**空文本 = 删除这一天**（所以界面上没有单独的删除按钮：
+清空再保存就是删除）。服务端把日期键校验到字符级，是因为放过 `2026-10-9` 这种写法就会在「同一天」存出两条。
+
+为什么按人而不按家庭：读取时（`plansFor`）**必须带 `_openid` 过滤**，否则你会在自己的日程里看到
+家人写的计划，两边还会用同一个日期键互相覆盖。`clearAll` 也只清**调用者自己**的那份 ——
+创建者有权清空全家的事项，没权删家人写下的日记。
+
 **建议索引**：`fq_items` 建复合索引 `fid(升) + order(升)`；`fq_categories` 建 `fid(升) + order(升)`；
 `fq_members` 建 `_openid(升) + active(升)`（每次 action 都要靠它解析当前家庭）与 `fid(升)`；
 `fq_family` 建 `inviteCode(升)`（按码找家庭）；`fq_subs` 建 `_openid(升)`；
+`fq_plans` 建 `fid(升) + _openid(升) + date(升)`（三个字段合起来才是唯一键，upsert 直接查它）；
 `fq_items` 另建 `remindAt(升) + pushed(升) + done(升)`（`fqRemind` 每分钟按这三个字段扫一次）。
 
 ---
@@ -245,13 +348,14 @@ miniprogram/
 |---|---|---|
 | `bootstrap` | — | 首次自动建默认家庭 + 种子；返回 `{ categories, items, family, sub, fnVer, actions }`（分页取全，上限 500）。后两个是握手字段，客户端只用来判断云端是不是旧包 |
 | `sync` | `rev` | **自动同步**。rev 与云端一致 → `{ changed:false, rev }`（几十字节）；不一致 → 顺带把整份数据带回来（含 `sub`：额度可能刚被定时任务消耗掉） |
-| `addItem` | `item{title,note,quad,catId,priority,remindAt}` | |
-| `updateItem` | `id, patch{...}` | `patch.done` 会同步维护 `doneAt` 与 `doneBy` |
+| `addItem` | `item{title,note,quad,catId,priority,remindAt}` | 新建事项的 `progress` 固定落 `0`（不接受客户端指定，避免一建出来就是「八成完成」） |
+| `updateItem` | `id, patch{...}` | `patch.done` / `patch.progress` **任一个进来都会同时定下另一个**：`done ⟺ progress === 100`。`patch.done` 还会同步维护 `doneAt` 与 `doneBy`；`progress` 一律夹到 0–100 取整 |
 | `removeItem` | `id` | |
 | `reorder` | `items[{id, order, quad?}]` | 拖动排序 / 跨象限移动。逐条校验 `fid` 归属，单次上限 200 条；`quad` 不传则只改顺序 |
-| `bulk` | `op, quad, catId` | `op`: `markAllDone` / `clearDone` / `clearQuad` |
+| `bulk` | `op, quad, catId` | `op`: `markAllDone` / `clearDone` / `clearQuad`。`markAllDone` 会一并把 `progress` 写成 100（批量路径同样受那条耦合约束） |
 | `clearDone` | `catId`（可选） | 我的页「清空已完成」，不传则跨分类 |
-| `clearAll` | — | 我的页「清空全家数据」，分类保留。**仅家庭创建者** |
+| `clearAll` | — | 我的页「清空全家数据」，分类保留。**仅家庭创建者**。日程计划只清**调用者自己**的那份 |
+| `savePlan` | `date, text` | 日程计划 upsert。`date` 必须是 `YYYY-MM-DD`；**空文本 = 删除这一天**；内容没变则不写（不让 `rev` 白涨） |
 | `addCategory` | `name` | 重名会被拒 |
 | `removeCategory` | `id, moveTo?` | 删除分类。带 `moveTo` = 先把该分类下的事项搬过去再删；不带 = 连事项一起删。**空分类谁都能删；非空分类仅家庭创建者**。家里至少要留一个分类 |
 | `renameCategory` | `id, name` | 改分类名，同家庭内重名会被拒（改成自己原来的名字不算重名） |
@@ -275,29 +379,51 @@ miniprogram/
 node .workbuddy/tools/check-all.js
 ```
 
-它依次跑下面 5 个工具，最后汇总通过/未通过：
+它依次跑下面 11 步，最后汇总通过/未通过：
 
-| 工具 | 干什么 |
+| 步骤 | 干什么 |
 |---|---|
-| `mp-check.js` | 静态契约三件套（见下） |
+| `arch-check.js verify` | **组件化等价性守卫**：把组件就地展开成页面，比对 class 序列与「选择器 → 声明」映射是否仍与基线一致 |
+| `event-check.js` | 事件接线契约：组件自带 / 页面自带 / 出口闭合 / 取值形状 / 同名同形 |
+| `component-audit.js` | 组件解析审计：标签注册 / 四个文件齐 / `component:true` / 标签配平 |
+| `mp-check.js` | 静态契约四件套（见下） |
 | `class-collision.js` | 图标内部 class 与页面级 class 重名（曾经让删除图标整体右偏 21rpx） |
-| `test-reorder.js` | 页面逻辑仿真：拖动 / 左滑 / 排序模式 / 版本握手 / 提醒推送契约 |
-| `test-cloudfn.js` | 云函数逻辑仿真：拿假数据库真跑 `fqTodo/index.js` |
+| `test-reorder.js` | 页面逻辑仿真：拖动 / 左滑 / 排序模式 / 版本握手 / 提醒推送契约 / 总览页一屏装满 / **进度条手势与读写口径** |
+| `test-cloudfn.js` | 云函数逻辑仿真：拿假数据库真跑 `fqTodo/index.js`（含 **`done` ⟺ `progress` 耦合**） |
 | `test-remind.js` | 云函数逻辑仿真：真跑 `fqRemind/index.js`（去重 / 额度 / 模板槽位） |
+| `test-water.js` | 饮水逻辑仿真：吸附 / 夹紧 / 事件时机 / 跨天清零 |
+| `test-sched.js` | 日程逻辑仿真：月历 42 格排布 / 跨月跨年闰年 / 本地时区 / 圆点与列表同口径 / 计划取存 |
+| JSON 可解析 | 所有 `.json` 都能 `JSON.parse` |
+
+> **新增检查的顺序不能反**：① 先跑基线确认它是绿的；② 再逐条做变异，确认它会变红。
+> 一份永远绿的测试和没有测试是一样的 —— 这个项目已经踩过两次：`check-all` 曾用
+> 「参数够不够多」当跳过条件，把三个逻辑仿真步骤**静默跳过**还输出绿灯；
+> `event-check` 的取值形状规则曾被它自己的注释骗过去（注释里恰好写了它要 grep 的字符串）。
+>
+> **变异本身也要体检**（2026-10-09）：
+> - 每条变异先确认**变异点命中** —— 源码里找不到那段说明是脚本写错了，不是「通过」；
+> - 断言弱了会**红不了**（实测：一条「按钮挂在哪」的断言最初写成「在 A 与 B 之间」，
+>   把按钮挪出去照样绿 —— 改成按嵌套深度取 A 的**元素跨度**才守住）；
+> - 验「检查器有没有先剥注释」这类改动，**正/反向要成对做**：只把守卫删掉、却不在源码里
+>   放一条含插值/类名的注释，会得到一个**假的绿**（源码里本就没有地雷）；
+> - 反向对照还能定位「守卫住哪一层」：`arch-check` 的注释其实是 `wxml-flatten.js` 摊平时剥的，
+>   在 `classTokens` 里重复剥一遍纯属装饰。
 
 ### 1. 静态契约（mp-check）
 
 ```bash
 node .workbuddy/tools/mp-check.js \
-  miniprogram/pages/index/index.wxml \
-  miniprogram/pages/index/index.wxss \
-  miniprogram/pages/index/index.js
+  miniprogram/pages/index miniprogram/components miniprogram/app.wxss
 ```
+
+参数可以传文件，也可以传目录（目录会递归展开其中的 `.wxml` / `.wxss` / `.js`），混着传也行。
+组件化之后**不要再往里硬编码文件路径** —— 进化的方式是「多一个组件目录」，
+逐条列路径迟早会漏，而漏掉的那个正好就是契约的盲区。
 
 四件事：
 
-1. **class 契约** —— WXML 用到的 class 是否都在 WXSS 里有规则
-2. **data 契约** —— WXML 插值里引用的根变量是否都在 `Page.data` 里声明
+1. **class 契约** —— WXML 用到的 class 是否都在 WXSS 里有规则（**全局**看：组件是 `apply-shared`，页面样式本来就进得去）
+2. **data 契约** —— WXML 插值里引用的根变量是否都在同作用域的 `Page.data` / `Component.properties` 里声明（**按目录分作用域**：组件看不见页面的 data，页面也看不见组件的 properties）
 3. **结构配对** —— `{}` `()` `{{}}` 与标签闭合
 4. **固定头部** —— `dhead` / `filters` / `sortrow` 不得出现在 `<scroll-view class="scroller">` 里面
 
@@ -329,7 +455,7 @@ node .workbuddy/tools/class-collision.js \
 node .workbuddy/tools/test-reorder.js
 ```
 
-覆盖 23 组、273 条断言：同象限换位、带筛选时隐藏项不许被挤动、跨象限搬运、
+覆盖 24 组、345 条断言：同象限换位、带筛选时隐藏项不许被挤动、跨象限搬运、
 拖回原位不落库、左滑动作分发（未完成 → 完成 / 删除，已完成 → 撤销 / 删除，且确认前不发请求）、
 让位位移、跨段高亮、拖动几何（含「拖到首/尾那一档」的边界容差）、
 **版本握手**（云端版本一致静默、旧包弹窗一次、内容含「上传并部署」步骤、两端 `FN_VER` 常量相等）、
@@ -362,7 +488,15 @@ node .workbuddy/tools/test-reorder.js
 带提醒的事项时请求、且排在 `closeSheet` 之后落库之前 —— `requestSubscribeMessage` 必须在
 用户交互的那次调用栈里；只有 `accept` 才算攒到额度；`grantSub` 占住同步避让名额；
 我的页的「未送达」入口只在有未送达时出现、点了会给解释；`adoptSub` 对负数 / 脏值 /
-缺字段都要收敛而不是崩）。
+缺字段都要收敛而不是崩）、
+**事项进度条的读写口径与手势契约**（`rowVM` 读的 `pct` 对没有 `progress` 的老数据要回落成
+「完成？100 : 0」，而不是 `undefined`；「点一下圆点跳过去」这条路走 `onProgEnd`，
+而它在落库前会先把手势状态清掉 —— 所以百分比换算必须由**调用方把 rect 传进去**，
+自己去读 `this._pg` 会整条静默失效：不报错、不落库、进度不动；
+拖动过程中只走**单行路径 setData**（`rows[i].pct` / `sections[j].rows[i].pct`），
+不许 `render()` 整页重绘；两个视图落在**两棵不同的数据树**上，`progPath` 只看当前视图那一棵；
+纵滑（`|dx| <= |dy|`）必须永久放弃这一次手势，免得「先往下滑再往右滑」把列表滚动掰成改进度；
+排序模式下不响应触摸但**照旧 catch 掉事件**，所以也不会误触发卡片左滑）。
 
 ### 4. 云函数逻辑仿真测试
 
@@ -374,7 +508,7 @@ node .workbuddy/tools/test-reorder.js
 node .workbuddy/tools/test-cloudfn.js
 ```
 
-覆盖 20 组、214 条断言：`reorder` 的部分集提交与整段重排、跨象限带 `quad` 才改象限、
+覆盖 21 组、239 条断言：`reorder` 的部分集提交与整段重排、跨象限带 `quad` 才改象限、
 越权隔离（改别人的条目一条都不动）、空 items / 超 200 条 / 非法 id、
 **未知 action 的返回里带云端版本号**（就是本项目踩过的 `未知 action: reorder`）、
 `bootstrap` 的握手字段与首屏种子（2 分类 + 5 事项、二次进入不重复播种）、
@@ -399,7 +533,13 @@ node .workbuddy/tools/test-cloudfn.js
 拿别的模板 id 来记账被拒、额度按人隔离不串账）、
 **推送状态的生命周期**（新建事项带 `pushed=false`；只改标题不动提醒时**不**复位推送状态 ——
 否则会白发一条；提醒时间真的变了才复位；客户端改不了这几个字段（白名单之外）；
-`missed` 只数自己创建的，已完成的、送成功的、以及压根没有 `pushed` 字段的老数据都不算）。
+`missed` 只数自己创建的，已完成的、送成功的、以及压根没有 `pushed` 字段的老数据都不算）、
+**事项进度与完成是同一条状态线**（新建 / 种子事项的 `progress` 都是 0；
+只传 `progress: 60` 不传 `done` → `done` 保持 false；再传到 100 → **自动变成已完成**并补上
+`doneAt` / `doneBy`；从 100 退回 99 → 自动撤销完成态；只传 `done: true` → `progress` 被补成 100；
+`done: false` → 归零；超范围的 `150` / `-20` / 小数 / 非数字一律夹取或收敛成合法整数；
+两个字段互相矛盾时以 `done` 为准；最后把**整个集合扫一遍**断言不存在「`done` 与 `progress`
+互相打架」的行 —— 这一条是上面每条单点断言的总闸，也是新增写入路径时唯一能兜住漏网的口子）。
 
 > 一句话用法：**它绿了，说明 `fqTodo` 的代码是对的，剩下的只是部署动作。**
 > 它红了，才是代码本身要改。
@@ -448,16 +588,36 @@ node .workbuddy/tools/test-remind.js
 | 列表整体滚动 | 详情页的 `dhead` + 筛选 + 「调整顺序」+ 提示行、全部页的「调整顺序」+ 提示行，全部**固定在滚动区之外**，只有事项列表滚 | 事项一多，头部连同返回键、「调整顺序」一起被滚走，想调顺序得先滑回顶部。竖屏高度有限，头部固定是这类列表的通行做法 |
 | 手势提示文字在列表末尾 | 移到「调整顺序」那一行的正下方（固定头部内），且**与上面一行左对齐**（同为 32rpx 内缩） | 原来跟着列表滚，长列表里几乎永远看不到；放在操作入口下面，才是「操作前先看到说明」。居中的话上左下一中，两行看着像互不相干的两块，左对齐才读得出「这一行是在补充说明上一行」 |
 | 「我的」页四个统计块（与总览页同一个组件） | `.stat` 改成纵向 flex 居中 | `.stats.flat` 去掉了外层的 24rpx 上内边距，而 `.stat` 作为 flex item 默认会被拉到整高、内容却只有 62rpx —— 多出来的 26rpx 全落在下面，数字与标题就贴顶了。改用 flex 居中后不再依赖外层内边距刚好凑够高度 |
+| 设计稿里的进度条（一张独立的控件稿，带自己的配色） | **不另画一条，直接复用「今日饮水」那条**，只换颜色 | 两条本来是同一规格（饮水卡的注释里早就写着「与待办进度条同一规格」）。复用让「改厚度只需改一处」，也就不会出现两处视觉各自漂移；颜色用 `var(--wt)` 由宿主注入，所以复用不等于绑死配色 |
 
 ## 七、手势与排序模式
 
 | 手势 | 结果 |
 |---|---|
 | 横向滑动卡片（非排序模式） | 左滑露出 2 个操作（240rpx）：未完成 → 完成 / 删除；已完成 → 撤销 / 删除。**位移不到 45% 阈值就整个收回**，不留半个面板 |
+| 横向拖动卡片**底部的进度条**（非排序模式） | 圆点跟手走，**松手才落库**；拖到 100% 即完成，从 100% 拖回来自动撤销。**按住轨道任意位置点一下**，圆点直接跳过去（不必先精确按住那个 30rpx 的小圆点） |
 | 点卡片（非排序模式） | 进编辑抽屉；若该行正滑开着，这一下只收起，不进抽屉 |
 | 点「调整顺序」 | 进排序模式：只允许**拖手柄**，其他按钮全部锁住；列表本身照常滚动。同时 `wx.vibrateShort` + 卡片整体抖一下，作为「已进入可拖状态」的一次性信号 |
 | 按住卡片**右侧手柄**拖动（仅排序模式） | 纵向移动即换位，松手落库。拿起和拖动**都不再抖动/震动** |
 | 在卡片**本体**上纵向滑动（仅排序模式） | 就是滚列表，和平时完全一样 |
+
+**进度条为什么能同时和「左滑」「滚列表」共存**：卡片上一下子有了三处手势，其中
+左滑和拖进度**都是横向**的 —— 而横向手势只会判给先到的那一方，所以不能靠
+「谁先响应」，只能靠**指定胜者**。做法与拖动手柄（`.dh`）完全一样，是同一套手法的第二次应用：
+
+| 事件 | 挂法 | 为什么 |
+|---|---|---|
+| `touchstart` | **`catch`** | 截住手势，`.row-in` 的 `onRowStart` 收不到 → 左滑从第一帧起就没启动 |
+| `tap` | **`catch`** | 吸掉点击，否则「点一下改进度」会顺带弹出编辑抽屉（`onProgTap` 是**有意为空**的事件屏障，不是忘了实现） |
+| `touchmove` | **`bind`** | 横滑才吃这串手势；纵滑原样放过给 `scroll-view` |
+
+⚠️ `touchmove` 必须是 `bind`。若这里也 `catch`，每张卡片底部就会多出一条 48rpx 高、
+**按着滑不动的死区** —— 长列表里非常难受。（顺带也证明了 `catchtouchstart` 不会挡住
+`scroll-view` 自己滚动：真要挡滚动，社区里就不必到处用 `catchtouchmove` 了。）
+
+共享进度条那段 CSS 同理**刻意不写 `touch-action: none`**：它是「别把这串 touch 判成页面滚动」
+的第二道保险，代价是那一块区域再也滚不动。饮水卡挂在总览页（整页本来就不滚）上无所谓，
+事项卡片却长在长列表里 —— 所以这条策略留给宿主各自声明，共享资产不替宿主做决定。
 
 **头部固定**：详情页的 `dhead` / `filters` / `sortrow` / 提示行，全部页的 `sortrow` / 提示行，
 都写在 `<scroll-view class="scroller">` **之外**，是 `.screen`（纵向 flex）的固定子项。
@@ -628,6 +788,10 @@ iOS 对网络环境比 Android 敏感，优先试第 1、2 条。
 | 把该固定的头部写在滚动区里 | 列表一长，返回键、「调整顺序」、手势提示全被滚走，够不着 | `dhead` / `filters` / `sortrow` 必须是 `.screen` 的直接子项、且写 `flex: 0 0 auto`。有 mp-check 第 4 条守着 |
 | 用上下不对称的 padding 撑一行文字的高度 | 提示文字在那一行里明显偏上 | `padding: 4rpx 0 12rpx` 上 4 下 12。**要垂直居中就用 `height` + 等值 `line-height`**（`.swipecue` 是 `46rpx` / `46rpx`） |
 | 象限色底上的灰字（`--ink3`） | 详情页提示行几乎看不清 | 详情态整屏吃象限色，`.ink3` 的对比度不够。`.screen.detail-mode` 下把这类文字改成 `rgba(255,255,255,0.72)` |
+| 总览页给矩阵写死高度 | 屏幕矮一点就多出一条可滚动的尾巴，高一点就是一片留白 | **总览页不套 `scroll-view`**：`.ovbody` 用 flex 分配剩余高度（矩阵容器 `flex:1`、饮水卡 `flex:0 0 auto`），矩阵内部按容器均分（`.grid.fill` → `height: calc(50% - 7rpx)`）。「一屏装满」是 flex 分配出来的**结果**，不是量出来的巧合 —— 所以别再给 `.q` 写死高度，更不要用 JS 去算屏幕高 |
+| **绝对定位元素挂错了参照系** | 矮屏上悬浮「+」压住「今日饮水」的读数 | `.fab` 原本挂在 `.screen`（`position:fixed`）上，于是 `bottom` 的含义是「距屏幕底」，只能由 JS 按 `tab 高 + 安全区` 算成 px；可它要落的那一格高度是 flex 分配出来的 —— 屏幕一变矮就对不上。**把 `<fq-fab>` 挪进 `.ovgrid`、给 `.ovgrid` 加 `position:relative`**，坐标就成了「距矩阵右下角」的常数（`right:24rpx; bottom:22rpx`，与 `.q` 的 padding 26/24/22 对齐），矩阵变矮它跟着走。⚠️ 组件是 `virtualHost`、没有自己的节点，`.fab` 是 `.ovgrid` 的**直接子节点**，所以 `relative` 必须加在 `.ovgrid` 上 |
+| **共享控件里替宿主做决定** | 把它上提到 `app.wxss` 后，长列表里每张卡片底部多出一条按着滑不动的死区；圆点「到头了」的悬空提示也看不见了 | 共享块只定**规格**（尺寸 / 圆角 / 过渡 / 抓取反馈），**策略留给宿主**。`touch-action: none` 只有总览页那张饮水卡禁得起（那屏本来就不滚），卡片长在长列表里则必须放过纵滑；`overflow: hidden` 一加，0% 与 100% 时半个悬在轨道外的圆点就被裁掉了 —— 而那个悬空正是「到头了」的提示 |
+| **两条同款控件各写一份样式**（`fq-water.wxss` 里的进度条） | 平时看不出，改厚度时只改一处，于是「饮水的条比事项的粗一点」——**谁都不会报错，只会越走越歪** | 出现第二个用户时立刻**上提到 `app.wxss`**，用 `var(--wt)` 把颜色参数化（共享资产不认识任何具体颜色，所以在两个语境里都成立）。搬家后用「改名成 `.xbar` 让 `arch-check` 逐字比一遍声明体」的方式验过等价性 |
 
 标签（`.tag`）要固定 `height` + 等值 `line-height`：只靠 padding 撑高时，含拉丁字母的
 「P3」与纯中文的「工作」基线不同，视觉上一个偏头一个居中。
@@ -844,5 +1008,141 @@ where({ _openid, quota: _.gt(0) }).update({ data: { quota: _.inc(-1) } })
 
 1. `fqRemind` 部署时，除了「上传并部署」还要**单独点一次「上传触发器」**；
 2. `fq_subs` 集合建好（权限「仅创建者可读写」）；
-3. `fqTodo` 也要重新部署（`FN_VER` 4 → 5，不同步部署首屏会弹「云函数版本过旧」）；
+3. `fqTodo` 也要重新部署（提醒推送把 `FN_VER` 推到 5；**当前已是 7**，以 `utils/const.js` 为准）。
+   不同步部署首屏会弹「云函数版本过旧」；
 4. 正式发布之后把 `fqRemind/index.js` 的 `MINI_STATE` 从 `'trial'` 改成 `'formal'`。
+
+---
+
+## 十三、日程
+
+「今天将要干什么、明天准备干什么」—— 点月历上的任意一天就能写。（配套设计稿里的进度条那一项**没做**。）
+
+**入口**：底栏第 2 个 Tab（总览 / **日程** / 全部 / 我的）。它和「全部 / 我的」一样是内存里的视图状态，
+不走路由 —— 整个小程序仍然只有 `pages/index/index` 一个页面。
+
+**布局**：月历固定在顶部，日期头 + 两张计划卡 + 当天事项一起滚动。
+点日期是这一页的核心动作，日历要是被列表滚走，想换一天就得先滚回去。
+
+### 两条容易踩的口径
+
+1. **「这天的事项」= 提醒时间落在那一天**。`fq_items` 里**没有**日期字段，只有 `remindAt`，
+   所以这一段的语义照实写，不假装它是排期表。将来真给事项加上 `dueDate` 时，要改的是
+   `buildSchedRows()` 这一个函数**加上**月历圆点的口径 —— 两者必须同时改。
+2. **月历上的圆点与下面的事项列表必须是同一套判据**（都由 `remindAt` 归堆）。
+   口径一旦分叉，就会出现「有圆点但点进去是空的」这种没人解释得通的状态。
+   深点 = 有带提醒的事项，浅点 = 只写了计划；列表**不受分类筛选影响**（日程是跨分类的时间视图）。
+
+### 为什么手写日历，而不是引一个组件
+
+| 方案 | 结论 |
+|---|---|
+| 官方内置 `calendar` 组件 | **不存在**。网传「基础库 2.25.0 起支持」是错的，官方组件索引里没有它 |
+| `picker mode="date"` | 可靠，但只是一个滚轮选择器、**没有圆点标记**，而圆点正是这一页的核心价值 |
+| 第三方（Vant Weapp `calendar` / wx-calendar） | 要引入本项目**没有的** npm 构建链（`package.json` / `miniprogram_npm` / `node_modules` 全无），还要吞下一份包体积 |
+
+自己写的是约 150 行**纯函数**日期运算（`utils/format.js`），可以脱离页面单测 —— `test-sched.js` 正是这么做的。
+
+### 几个刻意的实现选择
+
+- **固定 42 格（6 行 × 7 列）、周一起始**：高度稳定比省一行重要。
+  表头用 `WEEK_MON`（`一…日`），**不要用 `WEEK`** —— 那个按 `getDay()` 的 `0=周日` 排，直接用会整体错开一列。
+- **日期一律按本地时区算**：不用 `new Date('2026-10-09')`（iOS 按 UTC 解析，东八区会退一天），
+  也不用 `toISOString()`（UTC，晚上 8 点后算到第二天 —— 于是「今晚的提醒」跑到明天的格子里）。
+- **「今天 / 明天」标签由「选中日与今天差几天」推出来**，绝不写死。日历能选任意一天，
+  写死的文案在选中 15 号时照样说「今天要做什么」—— 一个不报错、但会让人读错的谎。
+- **顶部那行小标题固定显示「今天」，不跟选中日走**（`pageMeta = dateCN(todayStr())`）；下面 `.dayh`
+  那行才是「我在看哪天」。两行都跟着点日历变的话，屏幕上就没有任何一处能告诉你
+  日历上那个描边圈（今天）到底是几号了。⚠️ 验收这条**必须选一个非今天的日期** ——
+  用今天验，「跟着选中日走」这个错误实现照样是绿的。
+- **计划按人存**（`fq_plans`，见 §三），不按家庭；编辑复用已有的底部抽屉，不另开弹层。
+
+### 上线前检查
+
+1. 新建 `fq_plans` 集合（权限「仅创建者可读写」），并按 §三 建 `fid + _openid + date` 复合索引；
+2. 重新部署 `fqTodo`（日程把 `FN_VER` 推到 6；**当前已是 7**，以 `utils/const.js` 为准）。
+   **不同步部署，首屏会弹「云函数版本过旧」** —— 这是有意的：
+   旧云函数不认识 `savePlan`，写计划会静默失败。
+
+---
+
+## 十四、事项进度条
+
+每个事项卡片底部一条进度条。**它和「完成」不是两个状态，是同一条状态线的两种读法**：
+拖到 100% 就是完成，从 100% 拖回来就是自动撤销。数据落云的字段是 `progress`（0–100 整数），
+与 `done` 的耦合钉在云函数里（见 §三、§四）。
+
+### 为什么不新画一条，而是复用「今日饮水」
+
+两条进度条本来就是同一个控件 —— 饮水卡那边的注释里甚至早就写着「圆点：白底 + 描边，
+**与待办进度条同一规格**」。原先整套样式长在 `fq-water.wxss` 里，那时只有饮水一个用户；
+事项进度条一来就有了第二个用户，于是按本项目的惯例**上提到 `app.wxss`**：
+
+| 类 | 位置 | 说明 |
+|---|---|---|
+| `.wtrack` `.wbar` `.wfill` `.wknob` | **`app.wxss`**（共享块） | 触区 48rpx / 轨道 14rpx / 圆点 32rpx，两个语境读同一份 |
+| `.wtrack.on` | **`app.wxss`** | 按住时的抓取反馈（轨道加深 + 圆点放大 1.24×） |
+| `.water .wtrack` | `fq-water.wxss` | 只留宿主自己的两件事：它在卡片里的排版（`margin-top`）、`touch-action: none` |
+| `.water.full .wfill` / `.wknob` | `fq-water.wxss` | 饮水达标后换成深一号的蓝（`--wt-d`） |
+| `.prog` 系列 | `index.wxss` | 事项卡片自己的三件事：排版、读哪个颜色、右侧那个读数 |
+
+三个细节值得单独记住：
+
+- **颜色由宿主给，共享资产不认识任何具体颜色**：填充与圆点描边都读 `var(--wt)`。
+  饮水卡定义 `--wt: #2e8fe0`，事项卡片定义成 `--wt: var(--qc, var(--ink3))` ——
+  于是**进行中的进度条自然长成所属象限的颜色**，与左侧色条、详情页底色读的是同一个值。
+  改颜色只需要动那一行。正因为它不认识颜色，两个语境才能共用同一份规格；
+  否则迟早出现「饮水的条比事项的粗一点」这种谁都不会报错的漂移。
+- **共享块里刻意没有 `overflow: hidden`**：圆点用 `left: <pct>%` + 负 margin 让百分比表示的是
+  **圆心**，代价是 0% 与 100% 时圆点各有一半悬在轨道外 —— 那正是「到头了」的提示。
+  加上裁剪就看不见了。
+- **共享块里也刻意没有 `touch-action: none`**：理由见 §七（总览页不滚，长列表滚）。
+
+### 颜色的唯一约束：绿只上图形，不上文字
+
+| 状态 | 填充 / 描边 | 右侧读数 |
+|---|---|---|
+| 进行中 | 所属象限色（`--qc`） | 灰字 `NN%` |
+| 已完成 | 完成绿 `--ok`（`#12a150`） | 灰字 `✓` |
+
+⚠️ **读数区永远不放染绿的数字。** 完成绿对白的对比度是 **3.37:1**：够图形的门槛（3:1），
+**跌破正文门槛（4.5:1）**。把「100%」这四个字符染绿，就是全页唯一一处不合规的文字 ——
+所以 100% 时把数字换成对勾，而不是把它染绿。`index.wxss` 里这段注释和
+`final-progress.html` 的自审计都各算了一遍这个数。
+
+### 三处横向手势怎么分开
+
+见 §七 的那张表：`touchstart` 用 `catch`（挡住左滑）、`tap` 用 `catch`（挡住进编辑）、
+`touchmove` 用 `bind`（放过纵滑给列表）。
+
+### 几个刻意的实现选择
+
+- **读数区固定 68rpx 宽**（设计稿 34px）。这是「`9%` → `100%` 位数变化不会把轨道左右推挤」的
+  唯一保证 —— WXSS 里 `font-variant-numeric` 不保证生效，靠固定宽度 + 右对齐顶上。
+  换成对勾之后它仍占同样宽度，所以**完成那一刻轨道不会突然变长**。
+- **拖动过程中只走单行路径 `setData`**（`rows[i].pct` / `sections[j].rows[i].pct`），
+  不走 `render()`：列表不重排、统计条不重算、其它卡片一个字节都不动。
+  两个视图共用同一个模板却落在**两棵不同的数据树**上，`progPath()` 只看当前视图那一棵 ——
+  两棵都扫的话，切视图那一瞬可能同时命中同一个 id，改错一棵的表现是
+  「数据对了、屏幕没动」，最难查。
+- **松手才落库**。拖动期间每帧发一次云函数就是几十个并发请求，而且它们还可能乱序到达 ——
+  最后到的那个不一定是你最后拖到的值。
+- **百分比换算的 `rect` 由调用方传进去**，不让 `progPctAt` 自己读 `this._pg`：
+  `onProgEnd` 在落库前会先把手势状态清掉，那时再读就什么都读不到，而这条路径恰好是
+  「点一下圆点跳过去」—— 它会**整条静默失效**（不报错、不落库、进度不动，看着像没点到）。
+  这个 bug 是写测试时抓到的，不是想出来的。
+- **纵滑永久放弃本次手势**（判据与左滑一致：`|dx| <= |dy|` 就认输）。不永久放弃的话，
+  用户「先往下滑、再往右滑」会把列表滚动硬生生掰成改进度。
+- **排序模式下不响应进度条**，但手势**照旧被 `catch` 截住** —— 所以拖手柄时也不会
+  误触发卡片左滑。分享的 CSS 类 `lock` 同时让它看起来是「锁住的」。
+
+### 上线前检查
+
+1. 重新部署 `fqTodo`（`FN_VER` 6 → **7**）。⚠️ 这次**没有新增任何 action**，但照样要 +1：
+   旧云函数不认识 `progress`（白名单写法会把它悄悄丢掉），客户端拖完看着生效、
+   一刷新全回 0% —— 又是一次「拖了才知道」的静默故障，正是握手要提前拦住的那一类。
+2. 不需要改集合结构（`progress` 是普通字段），已有数据自动回落成「完成？100 : 0」；
+   旧文档没有 `progress` 时客户端读的是 `done`，不是 `undefined`。
+3. 上线前跑 `node .workbuddy/tools/check-all.js`；像素级验收见
+   `.workbuddy/tmp/final-progress.html`（1rpx = 1px 复刻页，页内自带 18 项自审计）。
+

@@ -1,0 +1,83 @@
+{
+  "_note": "Batch 2：fq-cats / fq-quad / fq-dhead / fq-filters。行号是当前 index.wxml(533 行) 与 index.wxss(1194 行) 上的 1-based 闭区间。",
+
+  "components": [
+    {
+      "name": "fq-dhead",
+      "title": "详情页顶部导航（颜色随象限）",
+      "wxml": [
+        {
+          "from": 122,
+          "to": 139,
+          "expectFirst": "<view class=\"dhead {{quad}}\">",
+          "expectLast": "</view>",
+          "replaceWith": "<fq-dhead wx:if=\"{{view==='detail'}}\" quad=\"{{quad}}\" quad-name=\"{{quadName}}\" quad-hint=\"{{quadHint}}\" quad-undone=\"{{quadUndone}}\" quad-cap=\"{{quadCap}}\" capsule-reserve=\"{{capsuleReserve}}\" sort-mode=\"{{sortMode}}\" bind:back=\"onBack\" bind:menu=\"onQuadMenu\" />"
+        }
+      ],
+      "wxss": [
+        { "from": 69, "to": 150, "expectFirst": "详情页顶部导航", "expectLast": "}" }
+      ],
+      "hoist": [
+        { "from": 561, "to": 565, "expectFirst": "被「锁住」的区域", "expectLast": "}" }
+      ],
+      "hoistBanner": "/* ================= 共享：排序模式「锁住」 =================\n   .lock 挂上去 = 看得见、点不动。详情页头部的 ⋮（fq-dhead）与筛选条\n   （fq-filters）都要用，而它们各自是独立组件、样式不互通，所以定义上提到这里。\n   app.wxss 的 class 规则能进组件 —— 这是官方文档对 apply-shared / addGlobalClass\n   的明确语义（示例里就是 app.wxss 定义 .red-text、组件模板直接用），不是碰巧。 */",
+      "js": "    onBack() {\n      this.triggerEvent('back');\n    },\n\n    onQuadMenu() {\n      this.triggerEvent('menu');\n    },",
+      "jsNote": "方法名保持页面原来的名字（onBack / onQuadMenu），因为组件 WXML 是从页面\n逐字搬来的，里面写死了这两个 bindtap。对外换成自己的事件名 back / menu。\n页面侧：bind:back=\"onBack\" / bind:menu=\"onQuadMenu\"。\n\nsortMode 是属性而不是让页面挂 class：排序模式下尾部的 ⋮ 要变灰不可点，\n这个判断由组件自己做，页面只管把它当前的状态传进来。"
+    },
+    {
+      "name": "fq-cats",
+      "title": "分类胶囊条（仅总览）",
+      "wxml": [
+        {
+          "from": 86,
+          "to": 111,
+          "expectFirst": "分类胶囊（仅总览）",
+          "expectLast": "</view>",
+          "bodyEdits": [[" wx:if=\"{{view==='overview'}}\"", ""]],
+          "replaceWith": "<fq-cats wx:if=\"{{view==='overview'}}\" cat-tabs=\"{{catTabs}}\" bind:pick=\"onPickCat\" bind:add=\"onAddCategory\" />"
+        }
+      ],
+      "wxss": [
+        { "from": 152, "to": 227, "expectFirst": "分类胶囊", "expectLast": "}" }
+      ],
+      "js": "    onPickCat(e) {\n      this.triggerEvent('pick', e.currentTarget.dataset);\n    },\n\n    onAddCategory() {\n      this.triggerEvent('add');\n    },",
+      "jsNote": "页面侧：bind:pick=\"onPickCat\" / bind:add=\"onAddCategory\"。\n\n⚠️ onPickCat 在页面上有**两个来源**：这个组件（值走 e.detail），\n以及「我的」页里的分类行（还是原来的 currentTarget.dataset）。\n所以那个 handler 两边都要认 —— 见 index.js 里的写法。"
+    },
+    {
+      "name": "fq-quad",
+      "title": "总览 2×2 满色矩阵",
+      "wxml": [
+        {
+          "from": 199,
+          "to": 232,
+          "expectFirst": "<view class=\"grid\">",
+          "expectLast": "</view>",
+          "replaceWith": "<fq-quad grid=\"{{grid}}\" bind:open=\"onOpenQuad\" />"
+        }
+      ],
+      "wxss": [
+        { "from": 253, "to": 409, "expectFirst": "四象限矩阵", "expectLast": "}" }
+      ],
+      "js": "    onOpenQuad(e) {\n      this.triggerEvent('open', e.currentTarget.dataset);\n    },",
+      "jsNote": "页面侧：bind:open=\"onOpenQuad\"（唯一调用点，所以那边直接从 e.detail 取）。\n\n矩阵的四块靠 .q.q1~.q4 取到 --qc；两个象限图标 .qmark 是共享资产、\n定义在 app.wxss，靠 apply-shared 进来。\n方块尺寸（宽 50% - 7rpx / 高 476rpx）与 .qrow 的等分说明都随样式一起来了，\n改之前先看头注释里「全局 box-sizing 是 border-box」那一条。"
+    },
+    {
+      "name": "fq-filters",
+      "title": "详情页筛选（待办 / 已完成 / 全部）",
+      "wxml": [
+        {
+          "from": 141,
+          "to": 149,
+          "expectFirst": "<view class=\"filters",
+          "expectLast": "</view>",
+          "replaceWith": "<fq-filters filters=\"{{filters}}\" sort-mode=\"{{sortMode}}\" bind:filter=\"onFilter\" />"
+        }
+      ],
+      "wxss": [
+        { "from": 491, "to": 515, "expectFirst": "详情筛选", "expectLast": "}" }
+      ],
+      "js": "    onFilter(e) {\n      this.triggerEvent('filter', e.currentTarget.dataset);\n    },",
+      "jsNote": "页面侧：bind:filter=\"onFilter\"（唯一调用点，那边直接从 e.detail 取）。\n\n为什么事件叫 filter 而不是 pick：fq-cats / fq-tabbar 已经占用了 pick，\n而 event-check 的「同名同形」规则要求同名事件形状一致 —— 换个名字比\n让三处共用同一套语义更清楚。"
+    }
+  ]
+}

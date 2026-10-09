@@ -1,0 +1,57 @@
+<!-- components/fq-cal/fq-cal.wxml
+     月历（月份条 + 7×6 = 42 格网格）
+
+     它是个**纯展示 + 转发**的组件：哪一格是今天、哪一格被选中、哪几天有内容，
+     全部由页面算好、通过 cells 传进来。组件自己不碰日期，也不碰数据。
+
+     为什么固定 6 行 42 格（哪怕当月只需 5 行）：切月份时日历高度不变，
+     下面的内容不会跟着上下窜。日历是高频切换组件，高度稳定比省一行重要。
+
+     日期用三重编码，不靠颜色：
+       今天   → .num 描边圈（.today）
+       选中   → .num 实心填充（.sel）
+       有内容 → 下方圆点：深点 = 那天有带提醒的事项，淡点 = 那天写过计划
+     选中今天时描边与填充重合，自然合成一个实心圆，不需要额外的样式。
+
+     ⚠️ 两个圆点靠「深浅」区分含义，不是靠颜色 —— 这是刻意的：
+        颜色在这个组件里已经被「今天/选中」占用，再拿颜色区分内容类型会打架。
+        深淡两档在 8rpx 的圆点上本来就难分辨，所以它只是个「有内容」的提示，
+        真要分辨是什么，点进去看。 -->
+
+<view class="calwrap">
+  <view class="monthbar">
+    <text class="mv">{{label}}</text>
+    <view class="mbtn" bindtap="onPrev">
+      <view class="ico ico-chev-l chev-lg"></view>
+    </view>
+    <view class="mbtn" bindtap="onNext">
+      <view class="ico ico-chev-r chev-lg"></view>
+    </view>
+    <view class="mbtn {{attoday?'on':''}}" bindtap="onToday">今天</view>
+  </view>
+
+  <view class="cal">
+    <view class="wk">
+      <text wx:for="{{week}}" wx:key="*this">{{item}}</text>
+    </view>
+    <view class="days">
+      <!-- wx:key 用日期字符串：42 格里可能有上/下月的日子，
+           但整段是连续 42 天，日期键一定唯一。 -->
+      <view
+        class="dy {{item.other?'other':''}} {{item.today?'today':''}} {{item.sel?'sel':''}}"
+        wx:for="{{cells}}"
+        wx:key="k"
+        data-k="{{item.k}}"
+        bindtap="onPick"
+      >
+        <text class="num">{{item.n}}</text>
+        <!-- .dt 即使一个点都没有也要占位，否则有内容/没内容的格子高度差 8rpx，
+             整片网格会看出参差。 -->
+        <view class="dt">
+          <view class="i" wx:if="{{item.hi}}"></view>
+          <view class="i q" wx:if="{{item.hp}}"></view>
+        </view>
+      </view>
+    </view>
+  </view>
+</view>

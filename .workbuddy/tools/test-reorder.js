@@ -5,13 +5,41 @@ const fs = require('fs');
 // 本文件在 .workbuddy/tools/ 下，上两级即项目根
 const ROOT = path.resolve(__dirname, '..', '..');
 
+/* ---------------- 拆文件之后，「源码」是哪几份？ ----------------
+ *
+ * 下面这些静态契约原本读的是「那一个文件」。组件化 + 模块化之后，
+ * 同一份事实散到了多个文件里，于是每处断言都必须先回答一个问题：
+ * 我到底在断言什么？三种答案、三份来源：
+ *
+ *   PAGE_JS    真正的页面文件。断言「页面的某个方法/调用点」时用它。
+ *   CLIENT_JS  页面 + utils + services 拼起来。断言「客户端这一侧**
+ *              没有**做某事」时用它 —— 只看页面会把契约变成盲区
+ *              （fid 泄漏、硬编码模板 id 都可能发生在 services 里）。
+ *   PAGE_WXML  摊平后的页面 WXML（组件内容就地展开）。断言「页面长什么样」
+ *              时用它；直接用 index.wxml 会在组件搬出去之后全部失效。
+ *
+ * ⚠️ 千万不要为了让断言变绿而把 CLIENT_JS 换成 PAGE_JS —— 那正好把
+ *    契约的覆盖面砍掉了。改的时候请先想清楚上面那个问题。
+ * ⚠️ 也不要写死 FN_VER 的数字（见下面 PAGE_VER 的说明）。
+ */
+const WF = require('./wxml-flatten.js');
+const PAGE_JS = fs.readFileSync(path.join(ROOT, 'miniprogram/pages/index/index.js'), 'utf8');
+const CONST_JS = fs.readFileSync(path.join(ROOT, 'miniprogram/utils/const.js'), 'utf8');
+const CLIENT_JS = WF.clientJs();
+const PAGE_WXML = WF.flattenPage();
+// 全部 wxss（app.wxss + 页面 + 组件）拼起来、去注释。
+// 样式断言只关心「这条规则存在且内容如何」，不关心它住在哪个文件。
+const ALL_WXSS = WF.allWxss()
+  .map(function (f) {
+    return fs.readFileSync(f, 'utf8');
+  })
+  .join('\n')
+  .replace(/\/\*[\s\S]*?\*\//g, '');
+
 // 小程序端的协议版本。用例里一律引用它，**不要写死数字** ——
 // 写死的话每次升 FN_VER 都得来改测试，而「把断言改成绿的」永远是最顺手的那一步。
-const PAGE_VER = Number(
-  /const FN_VER = (\d+)/.exec(
-    fs.readFileSync(path.join(ROOT, 'miniprogram/pages/index/index.js'), 'utf8')
-  )[1]
-);
+// 常量本身住在 utils/const.js（2026-10-02 从 index.js 搬过来）。
+const PAGE_VER = Number(/const FN_VER = (\d+)/.exec(CONST_JS)[1]);
 
 let page = null;
 const cloudCalls = [];
@@ -67,6 +95,10 @@ function flushMeasure() {
 //      所以这里也把它排进队列，由 flushScroll() 决定什么时候生效；
 //   ② 越界会被夹取。这正是「滚到顶/底」的由来，自动滚能不能收手全靠它。
 const SC = { top: 300, height: 600, content: 2000, scrollTop: 0 };
+
+// 假轨道矩形：进度条把「手指的 x」换算成百分比时要的是 .wtrack 的 left + width。
+// 取一组好算的数（左 100、宽 200），用例里 clientX 100 → 0%、200 → 50%、300 → 100%。
+const PG = { left: 100, width: 200 };
 const scQueue = [];
 // 默认量不到滚动区：其余各组的触摸坐标会落在边缘带里，但既然量不到就不该自动滚，
 // 顺带也把「量不到 → 不自动滚、但拖动照常」这条降级路径测掉了。
@@ -124,23 +156,42 @@ global.wx = {
   createSelectorQuery() {
     const q = {
       _sel: '',
+      _rectCb: null,
       select(sel) { q._sel = sel; return q; },
       selectAll() { q._sel = ''; return q; },
-      boundingClientRect() { return q; },
+      boundingClientRect(fn) { q._rectCb = fn || null; return q; },
       exec(cb) {
-        // 单点查询：目前只有 measureScroller 用（量滚动区的上下边）。
-        // ⚠️ 单点查询的 res[0] 就是**那个节点的 rect**，
-        //    不是像 selectAll 那样是 rect 数组 —— 桩这里写错，
-        //    页面会一直走「量不到」的降级分支，测试却以为量到了。
+        /* 页面上有**两种**调用姿势，桩必须都认：
+             ① q.selectAll('.row').boundingClientRect(); q.exec(cb)
+                —— drag.js 量行位置 / 量滚动区用的。cb 收到的是数组 res，
+                   res[0] 才是第一条的 rect。
+             ② q.select('#id').boundingClientRect(fn).exec()
+                —— 量进度条轨道用的（链式，官文档的写法）。fn 收到的
+                   是**那个节点本身**，不是数组。
+           混淆这两者非常隐蔽：写成数组，fn 里 r.left / r.width 全是
+           undefined，拖动就永远换算不出百分比 —— 而测试只会看到「进度没变」，
+           看上去和「手势没接上」一模一样。 */
+        const give = function (payload, arr) {
+          if (q._rectCb) q._rectCb(payload);
+          if (cb) cb(arr);
+        };
         if (q._sel) {
-          if (!SC_MEASURABLE) return cb([]); // 量不到 → res[0] === undefined
-          return cb([{ top: SC.top, height: SC.height }]);
+          // 进度条量的是轨道（#rpt-<id>）：给 left + width 就够了
+          if (q._sel.indexOf('#rpt-') === 0) {
+            const r = { left: PG.left, width: PG.width, top: 0, height: 48 };
+            return give(r, [r]);
+          }
+          // 量不到 → res[0] === undefined（页面据此走降级分支）
+          if (!SC_MEASURABLE) return give(null, []);
+          const sc = { top: SC.top, height: SC.height };
+          return give(sc, [sc]);
         }
         const flat = CUR_PAGE ? CUR_PAGE.flatList() : [];
         const run = function () {
-          cb([flat.map(function (_, i) {
+          const arr = flat.map(function (_, i) {
             return { top: RECTS_TOP + i * 116, height: 100 };
-          })]);
+          });
+          give(arr, [arr]);
         };
         if (measureDeferred) measureQueue.push(run);
         else run();
@@ -156,6 +207,18 @@ require(path.join(ROOT, 'miniprogram/pages/index/index.js'));
 
 const CAT = 'c1';
 const CATS = [{ _id: CAT, name: '工作', order: 0 }];
+
+// 把 'rows[0].pct' 这种 setData 数据路径落到对象上。
+// 只实现页面真正用到的那几种形状（纯点号 + 方括号下标），不做通用解析。
+function setPath(root, path, val) {
+  const parts = path.replace(/\[(\d+)\]/g, '.$1').split('.');
+  let cur = root;
+  for (let i = 0; i < parts.length - 1; i++) {
+    cur = cur[parts[i]];
+    if (cur === null || cur === undefined) return; // 路径不存在 → 静默丢弃，与真机一致
+  }
+  cur[parts[parts.length - 1]] = val;
+}
 
 // items: [[id, quad, done, order], ...]
 function ctx(raw, view, filt, quad) {
@@ -175,7 +238,15 @@ function ctx(raw, view, filt, quad) {
   p.setData = function (patch, cb) {
     // scrollTop 是给视图层的指令，不是立即生效的状态 —— 排进队列，等 flushScroll()
     if (patch && patch.scrollTop != null) scQueue.push(patch.scrollTop);
-    Object.assign(p.data, patch);
+    // ⚠️ setData 支持**数据路径**（'rows[0].pct' / 'sections[1].rows[0].done' /
+    //    'form.title'），真机上它只推这两个字段、不动列表其余部分。
+    //    这里若只写 Object.assign，键名会原样落成 'rows[0].pct' 这个字符串键，
+    //    而 p.data.rows[0].pct 一动不动 —— 表现和「拖动没生效」一模一样，
+    //    是最容易把假象当成真 bug（或反过来）的一处。
+    Object.keys(patch || {}).forEach(function (k) {
+      if (k.indexOf('.') >= 0 || k.indexOf('[') >= 0) setPath(p.data, k, patch[k]);
+      else p.data[k] = patch[k];
+    });
     if (typeof cb === 'function') cb.call(p);
   };
   p.render();
@@ -543,12 +614,8 @@ console.log('\n[14] 拖动竞态：量行位置的异步回调迟到，不许留
 
 console.log('\n[15] 视图层防回归：静止行不挂 transform / 拖与滚分属两个元素');
 {
-  const wxml = fs
-    .readFileSync(path.join(ROOT, 'miniprogram/pages/index/index.wxml'), 'utf8')
-    .replace(/<!--[\s\S]*?-->/g, ''); // 去注释：注释里会引用「以前写过的写法」，否则误命中
-  const wxss = fs
-    .readFileSync(path.join(ROOT, 'miniprogram/pages/index/index.wxss'), 'utf8')
-    .replace(/\/\*[\s\S]*?\*\//g, ''); // 同理
+  const wxml = PAGE_WXML; // 摊平后的页面（组件内容已就地展开），注释在摊平时已剥掉
+  const wxss = ALL_WXSS;  // app.wxss + 页面 + 组件；样式断言不关心规则住在哪个文件
 
   const tfLines = wxml.split(/\r?\n/).filter(function (l) {
     return l.indexOf('style="transform:{{') >= 0;
@@ -589,8 +656,62 @@ console.log('\n[15] 视图层防回归：静止行不挂 transform / 拖与滚�
   // —— 本轮的两处纯样式改动 ——
   eq('提示行左对齐的规则存在', /\.swipecue\.left\s*\{[^}]*text-align\s*:\s*left/.test(wxss), true);
   eq('详情页与全部页的提示行都挂了 left', (wxml.match(/class="swipecue left"/g) || []).length, 2);
-  eq('总览页的矩阵说明没挂 left（仍居中）', /class="swipecue">矩阵/.test(wxml), true);
+  // 总览页的「矩阵按…」说明行已删（那一页现在一屏装满，不留提示行）。
+  eq('总览页不再有矩阵说明行', /swipecue[^>]*>\s*矩阵/.test(wxml), false);
+
+  // —— 总览页「一屏装满、不滚动」的契约 ——
+  //    这几条钉的是**做不到就会退化成滚动**的结构：矩阵必须能自适应，
+  //    不能写死高度；饮水卡不能被压缩；两者顺序固定（矩阵在上）。
+  eq('总览页用 .ovbody 承载（不套滚动区）', /class="ovbody"/.test(wxml), true);
+  eq('矩阵容器 .ovgrid 在位', /class="ovgrid"/.test(wxml), true);
+  eq('饮水卡排在矩阵之后', wxml.indexOf('class="ovgrid"') < wxml.indexOf('class="ovwater"'), true);
+  eq('矩阵启用自适应高度（fill 透到组件的根类上）', /class="grid \{\{fill\?'fill':''\}\}"/.test(wxml), true);
+  eq('.ovbody 用 flex 吃剩余高度', /\.ovbody\s*\{[^}]*flex\s*:\s*1\s+1\s+auto/.test(wxss), true);
+  eq('.ovbody 是纵向 flex 列', /\.ovbody\s*\{[^}]*flex-direction\s*:\s*column/.test(wxss), true);
+  eq('.ovgrid 也吃剩余高度（矩阵靠它算出确定的高）', /\.ovgrid\s*\{[^}]*flex\s*:\s*1\s+1\s+auto/.test(wxss), true);
+  eq('.ovwater 不被压缩', /\.ovwater\s*\{[^}]*flex\s*:\s*0\s+0\s+auto/.test(wxss), true);
+  eq('.grid.fill 撑满宿主给的高度', /\.grid\.fill\s*\{[^}]*height\s*:\s*100%/.test(wxss), true);
+  eq('.grid.fill 下两块按容器均分', /\.grid\.fill\s+\.q\s*\{[^}]*height\s*:\s*calc\(50%\s*-\s*7rpx\)/.test(wxss), true);
   eq('.stat 纵向居中（标题与数字不再贴顶）', /\.stat\s*\{[^}]*justify-content\s*:\s*center/.test(wxss), true);
+
+  // —— 悬浮新建按钮的落点（2026-10-09 修：矮屏上它压住了「今日饮水」的读数）——
+  //    .fab 是 position:absolute，「参照系是谁」决定了这两个偏移量的含义：
+  //      挂在 .screen 上  → 距屏幕底 = tab 高 + 安全区，得由 JS 按机型算 px；
+  //      挂在 .ovgrid 里  → 距矩阵右下角 = 常数，矩阵多高它就跟着走。
+  //    矩阵高度是 flex 分出来的（屏幕矮 → 矩阵矮），前者必然追不准，所以这条
+  //    只能靠结构钉死，光看样式是看不出来的。
+  // 找 `at` 处那个 <view> 的配对 </view>。
+  // ⚠️ 必须按嵌套深度数：摊平进来的矩阵子树里有一大堆 </view>，拿「下一个 </view>」
+  //    当终点的话，断言就退化成「按钮在 .ovgrid 开标签与 .ovwater 之间」——
+  //    而那种写法**连「按钮被挪到 .ovgrid 外面」都照样通过**。
+  //    （变异验证实测抓到过：这条断言最初就是那个弱版本，改坏了不变红。）
+  const closeOfView = function (src, at) {
+    const re = /<view\b[^>]*?(\/?)>|<\/view>/g;
+    re.lastIndex = src.lastIndexOf('<', at);
+    let depth = 0;
+    let m;
+    while ((m = re.exec(src))) {
+      if (m[0] === '</view>') {
+        depth--;
+        if (depth === 0) return re.lastIndex;
+      } else if (m[1] !== '/') {
+        depth++;
+      }
+    }
+    return -1;
+  };
+
+  const og = wxml.indexOf('<view class="ovgrid">');
+  const ogEnd = closeOfView(wxml, og);
+  const ow = wxml.indexOf('class="ovwater"');
+  const fab = wxml.indexOf('<view class="fab"');
+  eq('锚点齐备（.ovgrid 的开/闭标签、.ovwater、.fab 都找得到）', og >= 0 && ogEnd > og && ow > ogEnd && fab >= 0, true);
+  eq('悬浮新建落在 .ovgrid 的**元素跨度之内** → 即挂在矩阵容器内部', fab > og && fab < ogEnd, true);
+  eq('.ovgrid 成为绝对定位的参照系', /\.ovgrid\s*\{[^}]*position\s*:\s*relative/.test(wxss), true);
+  eq('.fab 距矩阵右边 24rpx（与 .q 的左右 padding 对齐）', /\.fab\s*\{[^}]*right\s*:\s*24rpx/.test(wxss), true);
+  eq('.fab 距矩阵底边 22rpx（与 .q 的下 padding 对齐）', /\.fab\s*\{[^}]*bottom\s*:\s*22rpx/.test(wxss), true);
+  eq('页面已不再算这个偏移量（fabBottom 连同 recalcFab 一起删掉）', /fabBottom|recalcFab/.test(PAGE_JS), false);
+  eq('组件也不再收这个入参（无参组件）', /properties\s*:/.test(fs.readFileSync(path.join(ROOT, 'miniprogram/components/fq-fab/fq-fab.js'), 'utf8')), false);
 }
 
 console.log('\n[16] 排序模式可滚动：手柄管拖，手指贴边时列表自己滚');
@@ -701,10 +822,9 @@ console.log('\n[17] 版本握手：云端是旧包时首屏就提示重新部署
   p.checkFnVer({ fnVer: PAGE_VER - 1 });
   eq('同一会话不重复弹', modalCalls.length, 1);
 
-  // 握手两端各有一份 FN_VER，只改一边等于白握 —— 直接读源码比对
-  const pv = /const FN_VER = (\d+)/.exec(
-    fs.readFileSync(path.join(ROOT, 'miniprogram/pages/index/index.js'), 'utf8')
-  );
+  // 握手两端各有一份 FN_VER，只改一边等于白握 —— 直接读源码比对。
+  // 小程序端那份住在 utils/const.js（2026-10-02 从 index.js 搬过来）。
+  const pv = /const FN_VER = (\d+)/.exec(CONST_JS);
   const cv = /const FN_VER = (\d+)/.exec(
     fs.readFileSync(path.join(ROOT, 'cloudfunctions/fqTodo/index.js'), 'utf8')
   );
@@ -842,8 +962,8 @@ new Promise(function (r) {
    是因为它们坏了都不会报错 —— 只会「看不见」，而看不见的 bug 最难发现。 */
 console.log('\n[20] 家庭视图层防回归');
 {
-  const wxml = fs.readFileSync(path.join(ROOT, 'miniprogram/pages/index/index.wxml'), 'utf8');
-  const js = fs.readFileSync(path.join(ROOT, 'miniprogram/pages/index/index.js'), 'utf8');
+  const wxml = PAGE_WXML;
+  const js = PAGE_JS;
 
   eq('「清空全家数据」只对创建者显示', /wx:if="\{\{fam\.isOwner\}\}" bindtap="onClearAll"/.test(wxml), true);
   eq('「生成邀请码」只对创建者显示', /wx:if="\{\{fam\.isOwner\}\}" bindtap="onGenInvite"/.test(wxml), true);
@@ -851,20 +971,34 @@ console.log('\n[20] 家庭视图层防回归');
   eq('「加入家人的家庭」对所有人显示', /\bbindtap="onJoinFamily"/.test(wxml), true);
   eq('成员行用服务端给的 key（不用 index，否则改名会串行）', /wx:key="key"/.test(wxml), true);
 
-  // fid 绝不能被客户端当成入参发出去：云函数用的是管理员权限，
-  // 一旦归属可以由入参决定，任何人构造一个请求就能读走全部家庭的数据。
-  const cloudCallArgs = js.match(/callCloud\([^)]*\)/g) || [];
-  eq('页面上确实有一批 callCloud 调用可查', cloudCallArgs.length >= 10, true);
-  eq(
-    '没有任何一处把 fid 当参数发给云函数',
-    cloudCallArgs.filter(function (c) { return /fid/.test(c); }),
-    []
-  );
+    // fid 绝不能被客户端当成入参发出去：云函数用的是管理员权限，
+    // 一旦归属可以由入参决定，任何人构造一个请求就能读走全部家庭的数据。
+    //
+    // 两条一起看，覆盖面比原来「只看 callCloud 的实参」大得多：
+    //   ① 调用点的实参里不许出现 fid（走 callCloud('x', {...}) 的路子）
+    //   ② 客户端源码任何位置都不许出现以 fid 为名的对象键
+    //      （payload 可能在 services 里拼装，不看这一条就是个盲区）
+    // 计数仍看页面 —— 调用点都在页面里。
+    const cloudCallArgs = PAGE_JS.match(/callCloud\([^)]*\)/g) || [];
+    eq('页面上确实有一批 callCloud 调用可查', cloudCallArgs.length >= 10, true);
+    const clientCallArgs = CLIENT_JS.match(/callCloud\([^)]*\)/g) || [];
+    eq(
+      '整个客户端的调用实参里都没有 fid',
+      clientCallArgs.filter(function (c) { return /fid/.test(c); }),
+      []
+    );
+    eq('客户端任何位置都没有以 fid 为名的对象键', /[{,]\s*fid\s*:/.test(CLIENT_JS), false);
   eq('sync 只传 rev', /callCloud\('sync', \{ rev: this\.rev \}\)/.test(js), true);
   eq('joinFamily 只传 code', /callCloud\('joinFamily', \{ code: code \}\)/.test(js), true);
 
-  // 自动同步的三个避让条件缺一不可
-  eq('syncTick 里同时判了 sortMode / 未落库写 / 抽屉', /sortMode \|\| pendingWrites > 0 \|\| this\.data\.sheetOpen/.test(js), true);
+    // 自动同步的三个避让条件缺一不可。
+    // 「未落库写」那一项从模块级变量变成了 services/cloud.js 的只读接口
+    // （记账钉在唯一的云出口上，页面只读）。
+    eq(
+      'syncTick 里同时判了 sortMode / 未落库写 / 抽屉',
+      /sortMode \|\| cloud\.pendingWriteCount\(\) > 0 \|\| this\.data\.sheetOpen/.test(js),
+      true
+    );
   eq('onShow 会起轮询', /onShow\(\)[\s\S]{0,200}startSync\(\)/.test(js), true);
   eq('onHide 会停轮询', /onHide\(\)[\s\S]{0,120}stopSync\(\)/.test(js), true);
 
@@ -877,8 +1011,8 @@ console.log('\n[20] 家庭视图层防回归');
    「删错行」，所以既有静态契约，也有真跑方法的交互断言。 */
 console.log('\n[21] 分类管理：长按改名 / 删除分类');
 {
-  const wxml = fs.readFileSync(path.join(ROOT, 'miniprogram/pages/index/index.wxml'), 'utf8');
-  const js = fs.readFileSync(path.join(ROOT, 'miniprogram/pages/index/index.js'), 'utf8');
+  const wxml = PAGE_WXML;
+  const js = PAGE_JS;
   const cloudSrc = fs.readFileSync(path.join(ROOT, 'cloudfunctions/fqTodo/index.js'), 'utf8');
 
   // ---- 入口：长按，而不是占用整行点击 ----
@@ -895,8 +1029,9 @@ console.log('\n[21] 分类管理：长按改名 / 删除分类');
   eq('本端 FN_VER 已升到 4 以上', PAGE_VER >= 4, true);
   eq('云函数动作清单里有 removeCategory', /'removeCategory'/.test(cloudSrc), true);
   eq('云函数动作清单里有 renameCategory', /'renameCategory'/.test(cloudSrc), true);
-  eq('removeCategory 算写操作', /'removeCategory'/.test(js), true);
-  eq('renameCategory 算写操作', /'renameCategory'/.test(js), true);
+    // 写操作名单住在 utils/const.js，所以这两条要在**整个客户端**里找
+    eq('removeCategory 算写操作', /'removeCategory'/.test(CLIENT_JS), true);
+    eq('renameCategory 算写操作', /'renameCategory'/.test(CLIENT_JS), true);
 
   // ---- 安全：服务端自己数事项，绝不采信客户端 ----
   eq(
@@ -1186,13 +1321,17 @@ console.log('\n[22] 拖动上手体验：启动竞态不许反复重来 + 高频
    只会表现为「明明设了提醒却收不到」，或者「额度悄悄少了却不知道为什么」。 */
 console.log('\n[23] 提醒推送视图层防回归（v5）');
 {
-  const wxml = fs.readFileSync(path.join(ROOT, 'miniprogram/pages/index/index.wxml'), 'utf8');
-  const js = fs.readFileSync(path.join(ROOT, 'miniprogram/pages/index/index.js'), 'utf8');
+  const wxml = PAGE_WXML;
+  const js = PAGE_JS;
 
-  eq('两端协议版本都是 5', Number(/const FN_VER = (\d+)/.exec(js)[1]), 5);
+  // 不写死版本号的绝对值 —— 两端**相等**已经由 [版本握手] 那组直接读两份源码比对过了。
+  // 这里只钉单调下限：改 action 清单必须升版本，升了就不该再掉回来。
+  eq('协议版本已到 v6 以上（日程计划）', PAGE_VER >= 6, true);
 
   // ---- 模板 id 只有服务端一个来源 ----
-  eq('客户端不硬编码模板 id', /1AaZ3iSMfGpplGMUIVArXIPssCKAj2p3hHFxJPpOmlM/.test(js), false);
+  // 这是一条**否定**断言，所以要查整个客户端：拆文件之后，
+  // 只看页面的话「services 里硬编码了一个模板 id」会完全查不出来。
+  eq('整个客户端都不硬编码模板 id', /1AaZ3iSMfGpplGMUIVArXIPssCKAj2p3hHFxJPpOmlM/.test(CLIENT_JS), false);
   eq('模板 id 由 adoptSub 从 bootstrap 存下来', /if \(s\.templateId\) this\.subTpl = s\.templateId;/.test(js), true);
 
   // ---- 攒额度：一个入口、一个条件、一种结果才算数 ----
@@ -1201,7 +1340,8 @@ console.log('\n[23] 提醒推送视图层防回归（v5）');
   eq('只在保存带提醒的事项时请求', /if \(remindAt\) this\.askSubscribe\(\);/.test(js), true);
   eq('只有用户点了「允许」才记账', /res\[tpl\] === 'accept'/.test(js), true);
   eq('grantSub 只传模板 id（加多少由服务端定）', /callCloud\('grantSub', \{ templateId: tpl \}\)/.test(js), true);
-  eq('grantSub 占住同步避让名额', /'grantSub',\n\]/.test(js), true);
+  // 写操作名单现在住在 utils/const.js，所以这条也要查整个客户端
+  eq('grantSub 占住同步避让名额', /'grantSub',\n\]/.test(CLIENT_JS), true);
 
   // requestSubscribeMessage 必须在**这一次 tap 的调用栈里**调 ——
   // 挪进 callCloud 的 then 里就过了「用户交互后」这个窗口。
@@ -1232,6 +1372,187 @@ console.log('\n[23] 提醒推送视图层防回归（v5）');
   m.adoptSub(null);
   eq('服务端没给 sub 时不炸', m.data.subQuota, 0);
   eq('也不清掉已有的模板 id', m.subTpl, 'TPL-X');
+}
+
+/* ==================================================================
+   [22] 事项进度条：读写口径 + 手势契约
+   ==================================================================
+   这一组一半是**静态契约**、一半是真跑逻辑：
+     · 静态那半盯的是「接线」——进度条和卡片左滑都是横向手势，谁截住谁
+       完全由 WXML 上的 bind/catch 决定，写错了是静默的（要么左滑失灵，
+       要么整个列表滚不动）。
+     · 逻辑那半盯的是「换算」——手指的 x 怎么变成百分比、什么时候落库。
+       这类错不报错，只会安静地显示错的数字。 */
+console.log('\n[22] 事项进度条：读写口径 + 手势契约');
+{
+  const wxml = PAGE_WXML;
+  const all = ALL_WXSS;
+
+  /* ---- A. 静态：WXML 接线 ---- */
+  // 用区间切片而不是全文匹配：`catchtouchstart` 这种串在别的组件里也有，
+  // 全文匹配等于把断言挂在了别人的代码上。
+  const i0 = wxml.indexOf('class="prog ');
+  const i1 = wxml.indexOf('class="rpv"');
+  const seg = i0 >= 0 && i1 > i0 ? wxml.slice(i0, i1) : '';
+  eq('进度条区块找得到（两个锚点都在）', seg.length > 0, true);
+  eq('进度条只写一份（详情页与「全部」页共用同一个模板）', (wxml.match(/class="prog /g) || []).length, 1);
+  eq('它是卡片最后一行（在标签行之后）', wxml.indexOf('class="tags"') < i0, true);
+
+  eq('.prog 用 catchtouchstart 拦住卡片左滑（两个横向手势只能有一个赢家）',
+     /catchtouchstart="onProgStart"/.test(seg), true);
+  eq('.prog 的 touchstart 绝不能是 bind（bind 的话左滑会从第一帧就启动）',
+     /bindtouchstart="onProgStart"/.test(seg), false);
+  eq('.prog 用 catchtap 吸掉点击（否则拖完松手会顺带弹出编辑抽屉）',
+     /catchtap="onProgTap"/.test(seg), true);
+  eq('.prog 的 touchmove 必须是 bind（用 catch 会在卡片底部留一条滚不动的死区）',
+     /bindtouchmove="onProgMove"/.test(seg) && !/catchtouchmove="onProgMove"/.test(seg), true);
+  eq('量的是轨道本身（#rpt-<id>），不是整行 —— 读数区不该算进百分比',
+     /id="rpt-\{\{item\._id\}\}"/.test(seg), true);
+  eq('填充宽度绑到 item.pct', /class="wfill" style="width:\{\{item\.pct\}\}%"/.test(seg), true);
+  eq('圆点位置绑到 item.pct', /class="wknob" style="left:\{\{item\.pct\}\}%"/.test(seg), true);
+  eq('排序模式下整块挂 .lock（看得见、点不动）',
+     /\{\{sortMode\s*\?\s*'lock'\s*:\s*''\}\}/.test(seg), true);
+  eq('100% 时挂 .full', /\{\{item\.done\s*\?\s*'full'\s*:\s*''\}\}/.test(seg), true);
+
+  /* ---- B. 静态：样式复用共享块 + 颜色只有两个入口 ---- */
+  eq('轨道/圆点规格来自 app.wxss 那条共享进度条（今日饮水同款）',
+     /^\.wtrack\s*\{[^}]*height:\s*48rpx/m.test(all) && /^\.wknob\s*\{[^}]*width:\s*32rpx/m.test(all), true);
+  eq('共享块里没有 touch-action（写了，卡片底部就多一条按着滑不动的死区）',
+     /^\.wtrack\s*\{[^}]*touch-action/m.test(all), false);
+  eq('颜色只有一个入口：--wt 取所属象限色',
+     /^\.prog\s*\{[^}]*--wt:\s*var\(--qc/m.test(all), true);
+  eq('100% 只改这一个 token（填充与圆点自动一起转绿）',
+     /^\.prog\.full\s*\{[^}]*--wt:\s*var\(--ok\)/m.test(all), true);
+  eq('轨道占满「读数之外」的剩余宽度，且 min-width:0',
+     /^\.prog\s+\.wtrack\s*\{[^}]*flex:\s*1;[^}]*min-width:\s*0/m.test(all), true);
+  eq('读数宽度固定（否则 9%→100% 位数一变就把轨道左右推挤）',
+     /^\.rpv\s*\{[^}]*flex:\s*0\s+0\s+68rpx/m.test(all), true);
+
+  /* ---- C. rowVM：进度的唯一读法（含 v7 之前的老数据） ---- */
+  {
+    const p = ctx([['a', 'q1', false, 10]], 'detail');
+    const it = p.items[0];
+
+    eq('没有 progress 字段的未完成事项 → 0%', p.rowVM(it).pct, 0);
+    it.done = true;
+    eq('没有 progress 字段的**已完成**事项 → 100%（不是 0，否则「完成=满格」当场破产）',
+       p.rowVM(it).pct, 100);
+    it.done = false;
+    it.progress = 72.6;
+    eq('小数落到整数（拖动每一帧都是小数）', p.rowVM(it).pct, 73);
+    it.progress = 250;
+    eq('越界的 progress 夹到 100', p.rowVM(it).pct, 100);
+    it.progress = -3;
+    eq('负数夹到 0', p.rowVM(it).pct, 0);
+    it.progress = 'abc';
+    eq('脏值不写成 NaN', p.rowVM(it).pct, 0);
+  }
+
+  /* ---- D. toggleDone：完成 = 100%，撤销 = 归零 ---- */
+  {
+    const p = ctx([['a', 'q1', false, 10]], 'detail');
+    cloudCalls.length = 0;
+    p.toggleDone('a');
+    eq('落库只送 done（progress 由云函数推，不做第二个真相来源）',
+       cloudCalls[cloudCalls.length - 1], { action: 'updateItem', id: 'a', patch: { done: true } });
+    eq('镜像同步：done = true', p.items[0].done, true);
+    eq('镜像同步：progress = 100', p.items[0].progress, 100);
+
+    p.toggleDone('a');
+    eq('撤销 → 镜像 done 落回 false', p.items[0].done, false);
+    eq('撤销 → 镜像 progress 归零（停在 100 等于没撤销）', p.items[0].progress, 0);
+  }
+
+  /* ---- E. progPath：两个视图落在两棵数据树上 ---- */
+  {
+    const pd = ctx([['a', 'q1', false, 10], ['b', 'q1', false, 20]], 'detail');
+    eq('详情页 → rows[i]', pd.progPath('b'), 'rows[1]');
+    eq('详情页里没有的 id → 空串（不瞎改）', pd.progPath('zz'), '');
+
+    const pa = ctx([['a', 'q1', false, 10], ['b', 'q3', false, 20]], 'all');
+    eq('「全部」页 → sections[j].rows[i]', pa.progPath('b'), 'sections[1].rows[0]');
+  }
+
+  /* ---- F. 手势：方向判别 / 换算 / 落库时机 ---- */
+  {
+    const p = ctx([['a', 'q1', false, 10], ['b', 'q1', false, 20]], 'detail');
+    cloudCalls.length = 0;
+
+    // ① 落在进度条上往下滑 = 滚列表。既不能改进度，也不能给抓取反馈。
+    // ⚠️ 横向位移必须 ≥ 5px，否则先撞上「横得够不够长」那道闸，
+    //    真正的方向判别（|dx| ≤ |dy| → 让路给滚动）根本轮不到。
+    //    变异验证实测：把方向判别整条删掉，用「横 2px / 纵 40px」照样全绿 ——
+    //    断言看着在守方向，其实守的是长度。
+    p.onProgStart(touch('a', 200, 400));
+    p.onProgMove(touch('a', 208, 440));
+    p.onProgEnd();
+    eq('纵滑不动进度（让路给 scroll-view）', p.data.rows[0].pct, 0);
+    eq('纵滑也不落库', cloudCalls.length, 0);
+    eq('纵滑不给抓取反馈（否则每次滑列表都在进度条上闪一下）', p.data.rows[0].pgOn, false);
+
+    // ② 横拖：手指落在轨道中线 → 50%
+    p.onProgStart(touch('a', 150, 400));
+    p.onProgMove(touch('a', 200, 402));
+    eq('拖动期间不落库（每帧发一次云函数就是几十个并发请求）', cloudCalls.length, 0);
+    eq('横拖到中线 → 读数 50%', p.data.rows[0].pct, 50);
+    eq('拖动中给抓取反馈', p.data.rows[0].pgOn, true);
+    p.onProgEnd();
+    eq('松手才落库，且只落一次', cloudCalls.length, 1);
+    eq('落的是一条 updateItem + progress',
+       cloudCalls[0], { action: 'updateItem', id: 'a', patch: { progress: 50 } });
+    eq('内存镜像同步到 50', p.items[0].progress, 50);
+    eq('松手收掉抓取反馈', p.data.rows[0].pgOn, false);
+
+    // ③ 拖到最右端 = 完成（整行当场划掉，不是松手才变）
+    p.onProgStart(touch('a', 150, 400));
+    p.onProgMove(touch('a', 300, 402));
+    eq('拖满 → 行上的 done 当场为真', p.data.rows[0].done, true);
+    p.onProgEnd();
+    eq('拖满落库 progress = 100', cloudCalls[1].patch, { progress: 100 });
+    eq('镜像 done 跟着为真', p.items[0].done, true);
+
+    // ④ 从 100% 拖回来 = 自动撤销完成
+    p.onProgStart(touch('a', 300, 400));
+    p.onProgMove(touch('a', 200, 402));
+    p.onProgEnd();
+    eq('拖回来 → 完成自动撤销（不留「已完成但进度 50%」的矛盾数据）', p.items[0].done, false);
+    eq('拖回来的进度也落库', cloudCalls[2].patch, { progress: 50 });
+
+    // ⑤ 轻点：圆点直接跳过去（圆点只有 30rpx，不要求先精确按住它）
+    cloudCalls.length = 0;
+    p.onProgStart(touch('a', 250, 400));
+    p.onProgEnd();
+    eq('轻点（无位移）→ 跳到该位置 75%', p.data.rows[0].pct, 75);
+    eq('轻点也落库', cloudCalls[0].patch, { progress: 75 });
+
+    // ⑥ 位移一大一小：横 8px / 纵 30px → 这是在滚列表，不是点
+    //    （横向同样要 ≥ 5px，理由见 ①）
+    cloudCalls.length = 0;
+    p.onProgStart(touch('a', 250, 400));
+    p.onProgMove(touch('a', 258, 430));
+    p.onProgEnd();
+    eq('位移偏纵向 → 既不算点击也不落库', cloudCalls.length, 0);
+    eq('进度也原样不动', p.data.rows[0].pct, 75);
+
+    // ⑦ 轨道矩形还没量回来：跳过这一帧，而不是拿 0 顶上去
+    cloudCalls.length = 0;
+    p.onProgStart(touch('a', 250, 400));
+    p._pg.rect = null; // 模拟「异步测量还没回来」
+    p.onProgMove(touch('a', 200, 402));
+    eq('量不到轨道时不动进度（拿 0 顶上会把进度条一下拽回最左端）', p.data.rows[0].pct, 75);
+    p.onProgEnd();
+  }
+
+  /* ---- G. 排序模式：进度条看得见、点不动 ---- */
+  {
+    const p = ctx([['a', 'q1', false, 10]], 'detail');
+    p.data.sortMode = true;
+    cloudCalls.length = 0;
+    p.onProgStart(touch('a', 200, 400));
+    eq('排序模式下不记手势（.lock 已把事件放行，这是第二道）', p._pg, null);
+    p.onProgEnd();
+    eq('排序模式下不落库', cloudCalls.length, 0);
+  }
 }
 
 // 整份测试的结算点。由 [19] 的 Promise 链末尾调用（见那里的说明）。

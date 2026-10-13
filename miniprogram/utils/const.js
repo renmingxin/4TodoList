@@ -66,7 +66,11 @@ const REORDER_CAP = 200;
 //     「done ⟺ progress === 100」这条耦合。**没有新增 action 也照样 +1** ——
 //     旧云函数不认识 progress，客户端拖完看着生效、一刷新全回 0%，正是握手要拦的
 //     那类静默故障。
-const FN_VER = 7;
+// v8：可配置的提前提醒时长。fq_items 多出 leadMin / pushAt 一对字段，
+//     fqRemind 的扫描条件从 remindAt 换成 pushAt。同样**没有新增 action** ——
+//     旧云函数不认识 leadMin，表现是「选好的提前量重进一次就变回 30 分钟」。
+//     ⚠️ fqRemind 不在 action 清单里，握手管不到它，改完要记得单独重新部署。
+const FN_VER = 8;
 
 // 自动同步的轮询间隔。页面可见时每 8 秒问一次「家庭数据变了没」，
 // 云函数只回一个 rev 数字，没变就是几十字节。
@@ -86,6 +90,34 @@ const WRITE_ACTIONS = [
   // pendingWrites —— 否则同步回来的 sub 会把这刚攒的那条盖回旧值。
   'grantSub',
 ];
+
+/* ---------------- 提醒推送 ---------------- */
+
+// 提前提醒时长的选项。**值必须与 fqTodo / fqRemind 的 LEAD_ALLOWED 完全一致**，
+// 三处一起改（云函数不能 require 本文件，两个云函数之间也不共享，只能各留一份；
+// test-remind.js 会读三份源码逐一比对，漏改一处就红）。
+//
+// ⚠️ -1 是「不提醒」的哨兵值，**不是「提前 0 分钟」**。理由写在 fqTodo 的
+// LEAD_ALLOWED 上面：0 若是个合法档位，脏值回落就会把提醒静默关掉。
+//
+// 单位是分钟。超过 1 天的几档不是凑数 —— 「提前一周提醒我交房租」靠的就是它们，
+// 也是这次改造最主要的收益（原先写死 10 分钟时，长周期事项根本提醒不到）。
+const LEAD_OPTIONS = [
+  { v: -1, label: '不提醒' },
+  { v: 5, label: '提前 5 分钟' },
+  { v: 10, label: '提前 10 分钟' },
+  { v: 30, label: '提前 30 分钟' },
+  { v: 60, label: '提前 1 小时' },
+  { v: 180, label: '提前 3 小时' },
+  { v: 1440, label: '提前 1 天' },
+  { v: 4320, label: '提前 3 天' },
+  { v: 10080, label: '提前 7 天' },
+  { v: 43200, label: '提前 30 天' },
+];
+
+// 没设过提前量时的默认档（30 分钟）。与两个云函数的 LEAD_DEFAULT 相同。
+// v8 之前的老数据也没有这个字段，读到 undefined 时一律按它兜底。
+const LEAD_DEFAULT = 30;
 
 /* ---------------- 今日饮水 ---------------- */
 
@@ -128,6 +160,8 @@ module.exports = {
   FN_VER: FN_VER,
   SYNC_MS: SYNC_MS,
   WRITE_ACTIONS: WRITE_ACTIONS,
+  LEAD_OPTIONS: LEAD_OPTIONS,
+  LEAD_DEFAULT: LEAD_DEFAULT,
   WATER_GOAL: WATER_GOAL,
   WATER_KEY: WATER_KEY,
   PLAN_MAX: PLAN_MAX,

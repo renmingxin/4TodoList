@@ -906,6 +906,142 @@ async function run() {
     eq('批量标记完成 → 进度一并补到 100', still.length, 0);
   }
 
+  console.log('\n[22] 提前提醒时长：白名单 / pushAt 预算 / 改它也要复位');
+  {
+    reset();
+    FC.OPENID = 'openid-a';
+    const boot = await call({ action: 'bootstrap' });
+    const catId = boot.data.categories[0]._id;
+    const DAY_MS = 24 * 3600 * 1000;
+
+    // ---- 默认值：不传就是 30 分钟，pushAt 由它算出来 ----
+    {
+      const add = await call({
+        action: 'addItem',
+        item: { title: '默认提前量', catId: catId, quad: 'q1', remindAt: Date.now() + 10 * DAY_MS },
+      });
+      const it = byId(add.data._id);
+      eq('不传 leadMin → 落默认 30 分钟', it.leadMin, 30);
+      eq('pushAt = 提醒时间 - 30 分钟', it.pushAt, it.remindAt - 30 * 60000);
+    }
+
+    // ---- 十个档位一个一个走一遍，确保白名单没有把哪一档排除了 ----
+    {
+      const vals = [-1, 5, 10, 30, 60, 180, 1440, 4320, 10080, 43200];
+      for (let i = 0; i < vals.length; i++) {
+        const add = await call({
+          action: 'addItem',
+          item: {
+            title: '档位' + vals[i],
+            catId: catId,
+            quad: 'q1',
+            remindAt: Date.now() + 400 * DAY_MS,
+            leadMin: vals[i],
+          },
+        });
+        eq('白名单档位 ' + vals[i] + ' 原样落库', byId(add.data._id).leadMin, vals[i]);
+      }
+    }
+
+    // ---- 「不提醒」：pushAt 落 null，fqRemind 的 _.gt(0) 自然挑不到 ----
+    {
+      const add = await call({
+        action: 'addItem',
+        item: { title: '不提醒', catId: catId, quad: 'q1', remindAt: Date.now() + 5 * DAY_MS, leadMin: -1 },
+      });
+      const it = byId(add.data._id);
+      eq('选了不提醒 → leadMin = -1', it.leadMin, -1);
+      eq('选了不提醒 → pushAt 落 null（不会误发）', it.pushAt, null);
+      ok('提醒时间仍然存着（只是不发通知，不是删掉它）', it.remindAt > 0);
+    }
+
+    // ---- ⚠️ 白名单之外一律回落默认，**绝不回落成 -1** ----
+    // 这是整条改造最容易写错的地方：0 若被当成合法档位，一个脏值
+    // （老数据的 null、前端手滑传的字符串）就会把这条提醒**静默关掉**。
+    // 回落成 30 只是「发得比预期早」，用户看得见也改得回来。
+    {
+      const bad = [0, 7, 999, -2, 31, 5.6, 'abc', null, undefined, NaN];
+      for (let i = 0; i < bad.length; i++) {
+        const add = await call({
+          action: 'addItem',
+          item: {
+            title: '脏值',
+            catId: catId,
+            quad: 'q1',
+            remindAt: Date.now() + 400 * DAY_MS,
+            leadMin: bad[i],
+          },
+        });
+        eq('脏值 ' + String(bad[i]) + ' → 回落 30（不是 -1）', byId(add.data._id).leadMin, 30);
+      }
+    }
+
+    // ---- 没设提醒时间 → 两个字段都是 null ----
+    {
+      const add = await call({
+        action: 'addItem',
+        item: { title: '没提醒', catId: catId, quad: 'q1', leadMin: 30 },
+      });
+      const it = byId(add.data._id);
+      eq('没设提醒时间 → leadMin 落 null', it.leadMin, null);
+      eq('没设提醒时间 → pushAt 落 null', it.pushAt, null);
+    }
+
+    // ---- 只改提前量，也要像改提醒时间那样复位推送状态 ----
+    {
+      const add = await call({
+        action: 'addItem',
+        item: { title: '改提前量', catId: catId, quad: 'q1', remindAt: Date.now() + 10 * DAY_MS, leadMin: 30 },
+      });
+      const id = add.data._id;
+      const base = byId(id).remindAt;
+
+      byId(id).pushed = true;
+      byId(id).pushOk = true;
+
+      await call({
+        action: 'updateItem',
+        id: id,
+        patch: { title: '只改标题', remindAt: base, leadMin: 30 },
+      });
+      eq('两个提醒字段原样回传 → 已推过的不重新排队', byId(id).pushed, true);
+
+      await call({ action: 'updateItem', id: id, patch: { leadMin: 60 } });
+      eq('只改提前量 → pushed 复位', byId(id).pushed, false);
+      eq('pushAt 跟着提前量重算', byId(id).pushAt, base - 60 * 60000);
+      eq('提醒时间没被动过', byId(id).remindAt, base);
+      ok('pushOk 也复位', byId(id).pushOk === false);
+
+      byId(id).pushed = true;
+      await call({ action: 'updateItem', id: id, patch: { leadMin: -1 } });
+      eq('改成「不提醒」→ pushed 复位', byId(id).pushed, false);
+      eq('改成「不提醒」→ pushAt 清成 null', byId(id).pushAt, null);
+    }
+
+    // ---- 清除提醒时间：三个字段一起清，不留半截 ----
+    {
+      const add = await call({
+        action: 'addItem',
+        item: { title: '清除提醒', catId: catId, quad: 'q1', remindAt: Date.now() + 10 * DAY_MS, leadMin: 60 },
+      });
+      const id = add.data._id;
+      await call({ action: 'updateItem', id: id, patch: { remindAt: null } });
+      eq('清提醒时间 → remindAt 落 null', byId(id).remindAt, null);
+      eq('清提醒时间 → leadMin 一并落 null', byId(id).leadMin, null);
+      eq('清提醒时间 → pushAt 一并落 null', byId(id).pushAt, null);
+    }
+
+    // ---- 全库不变量：只要带着 pushAt，就必须有提醒时间、且不是「不提醒」----
+    // 逐条断言容易漏掉某条写入路径（addItem / updateItem / seed），这里整库验一遍。
+    {
+      const bad = COLLECTIONS.fq_items.filter(function (r) {
+        if (r.pushAt === null || r.pushAt === undefined) return false;
+        return !(r.remindAt > 0) || r.leadMin === -1;
+      });
+      eq('全库没有「不提醒却带着 pushAt」的行', bad.length, 0);
+    }
+  }
+
   console.log('\n----------------------------------------');
   console.log('通过 ' + pass + ' / 失败 ' + fail);
   process.exit(fail ? 1 : 0);

@@ -382,7 +382,7 @@
           </view>
           <!-- 额度是「按条」的，这一点必须说清楚：微信的一次性订阅，
                点一次允许只买到一条消息，不是买到长期推送。 -->
-          <text class="hint flat">每次设提醒都会提前 10 分钟推到微信服务通知；额度按条计算，用完就不再推，但提醒时间仍然存着</text>
+          <text class="hint flat">每条提醒按它自己设的提前量推到微信服务通知（没设过就按默认的提前 30 分钟）；额度按条计算，用完就不再推，但提醒时间仍然存着</text>
         </view>
 
         <view class="mecard">
@@ -593,6 +593,22 @@
             </picker>
             <view class="clear" wx:if="{{form.hasRemind}}" bindtap="onClearRemind">清除</view>
           </view>
+        </view>
+
+        <!-- 提前提醒时长（v8）。**只在设了提醒时间时出现** —— 没有提醒时间
+             就谈不上「提前多久」。用条件渲染而不是置灰：一个永远点不动的选项
+             比不出现更让人困惑，用户会以为「这里本该能选」。
+             下面的小字是授权说明，不是可选项的一部分 —— 用户得先知道
+             「收得到收不到取决于授权」，才不会把「没收到」当成 bug。 -->
+        <view class="field" wx:if="{{form.hasRemind}}">
+          <text class="label">提前提醒</text>
+          <picker mode="selector" range="{{leadLabels}}" value="{{form.leadIdx}}" bindchange="onLead">
+            <view class="rowline">
+              <view class="pick">{{form.leadLabel}}</view>
+              <view class="ico ico-chev-r"></view>
+            </view>
+          </picker>
+          <text class="subhint">这是微信内部提醒，需你同意授权后才能收到；未授权时提醒仍会保存，但不会推送到微信</text>
         </view>
 
       </scroll-view>

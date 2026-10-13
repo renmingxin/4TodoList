@@ -807,6 +807,18 @@
   margin-bottom: 14rpx;
 }
 
+/* 设置项下面那行小字（v8：提前提醒的授权说明）。
+   它和 .label 是两种东西 —— 「标签」vs「说明」，所以同色不同压强：
+   字号一样，但字重 400（label 是 600）、行高放开。靠字重分层而不是靠层级。 */
+.subhint {
+  display: block;
+  margin-top: 12rpx;
+  font-size: 22rpx;
+  font-weight: 400;
+  line-height: 1.55;
+  color: var(--ink3);
+}
+
 /* input 的高度在小程序里由 font-size 推断，再叠 padding 容易被裁切。
    改成固定高度 + 等值 line-height，文字稳定垂直居中。 */
 .input {
@@ -960,6 +972,14 @@
 }
 
 .rowline .pick.right .ico-chev-r {
+  margin-left: 14rpx;
+  flex: 0 0 14rpx;
+}
+
+/* v8：「提前提醒」那一行整行是 picker，箭头不在 .pick 内部，上面那条挑不到它。
+   提取成通用规则而不是再加一条 .pick 变体 —— 箭头只要落在 .rowline 里就该钉死宽度，
+   这本来就与它左边装什么无关。 */
+.rowline .ico-chev-r {
   margin-left: 14rpx;
   flex: 0 0 14rpx;
 }

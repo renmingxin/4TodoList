@@ -7,7 +7,9 @@
 // 只实现两份云函数真正用到的方法，不做通用模拟。但**查询条件**要尽量贴近真库：
 //
 //   · 等值：        doc[k] === v
-//   · 比较命令：    gt / gte / lt / lte / neq / in / and / or（db.command）
+//   · 比较命令：    gt / gte / lt / lte / neq / in / and / or / exists（db.command）
+//   · exists 判的是「字段**在不在**」，不是「值空不空」：_.exists(false) 挑不到
+//     显式落 null 的文档（那是「用户选了不提醒」），只挑得到压根没这个字段的老数据。
 //   · 字段不存在时：_.neq(x) **命中**（MongoDB 的 $ne 就是这个行为），
 //                   而等值 false **不命中**。
 //     「pushed: false」和「pushed: _.neq(true)」在选择条件里**不等价** ——
@@ -62,6 +64,13 @@ const command = {
   in: function (arr) {
     return { __in: arr };
   },
+  // v8 新增：backfillPushAt 用 _.exists(false) 挑「字段压根不存在」的老文档。
+  // 注意它与「值为 null」是两回事 —— 后者是显式落库的空值，代表用户选了「不提醒」，
+  // 绝不能被回填逻辑当成老数据再补一遍。假 SDK 必须还原这个区别，
+  // 否则「不提醒的条目会被反复回填」这个 bug 在本地测不出来。
+  exists: function (v) {
+    return { __exists: !!v };
+  },
   and: function () {
     return wrapAnd([].slice.call(arguments));
   },
@@ -70,9 +79,12 @@ const command = {
   },
 };
 
-// 单字段的条件求值
-function test(cond, val) {
+// 单字段的条件求值。has = 该字段在文档里**存在**（哪怕值是 null）。
+// 只有 _.exists 用得上它 —— 其余条件判的都是「值」，字段缺失时 val 是 undefined，
+// 走 JS 的比较语义就够了（与 MongoDB 一致）。
+function test(cond, val, has) {
   if (cond && typeof cond === 'object') {
+    if (cond.__exists !== undefined) return !!has === cond.__exists;
     if (cond.__cmp) {
       switch (cond.__cmp) {
         case 'gt':
@@ -87,8 +99,8 @@ function test(cond, val) {
           return val !== cond.v;
       }
     }
-    if (cond.__and) return cond.__and.every(function (c) { return test(c, val); });
-    if (cond.__or) return cond.__or.some(function (c) { return test(c, val); });
+    if (cond.__and) return cond.__and.every(function (c) { return test(c, val, has); });
+    if (cond.__or) return cond.__or.some(function (c) { return test(c, val, has); });
     if (cond.__in) return cond.__in.indexOf(val) >= 0;
   }
   return val === cond;
@@ -96,7 +108,7 @@ function test(cond, val) {
 
 function match(doc, cond) {
   return Object.keys(cond).every(function (k) {
-    return test(cond[k], doc[k]);
+    return test(cond[k], doc[k], Object.prototype.hasOwnProperty.call(doc, k));
   });
 }
 

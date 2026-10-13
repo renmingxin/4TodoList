@@ -66,8 +66,22 @@ function seed(opts) {
   }
 }
 
+// v8：fqRemind 改按 pushAt 扫 —— 提前量逐条不同，一个全局窗口表达不了。
+//
+// ⚠️ 夹具里 **remindAt 与 pushAt 已经解耦**，别再让 pushAt 由 remindAt 折算出来。
+// 曾经想写成 `pushAt = remindAt - 10min` 来复刻旧语义，但那样默认夹具的 pushAt
+// 恰好落在 `now - LATE_MS`（迟到容忍 5 分钟）的**边界**上：`at < now - 5min`
+// 成不成立取决于两次 Date.now() 之间那几毫秒，用例会偶发飘红。
+//
+// 所以默认给「**现在就该发**」：remindAt 只是个好看的文案值（消息的 time23 槽），
+// 什么时候发完全由 pushAt 说了算。要测「还没到期 / 已经过期 / 谁先谁后」，
+// 显式传 pushAt —— 这也比「换个提前量再看效果」直白得多。
+const FIX_LEAD_MS = 10 * MIN;
+
 function mkItem(over) {
   seq++;
+  const o = over || {};
+  const noRemind = o.remindAt === null;
   const d = Object.assign(
     {
       _id: 'it' + seq,
@@ -79,13 +93,30 @@ function mkItem(over) {
       catId: 'cat1',
       done: false,
       remindAt: Date.now() + 5 * MIN,
+      leadMin: 10,
+      pushAt: Date.now(),
       pushed: false,
       pushedAt: null,
       pushOk: false,
       pushErr: '',
     },
-    over || {}
+    o
   );
+  // 没设提醒时间 → pushAt 也得是 null（真库里 addItem 就是这么落的）。
+  // 少了这一步，「remindAt: null 不该被捞到」那条断言会因为 pushAt 仍是
+  // 「现在」而失败 —— 而且失败的原因和它想测的东西完全无关。
+  if (noRemind) {
+    d.remindAt = null;
+    d.pushAt = null;
+  }
+  // 造「v8 之前的老数据」：leadMin 与 pushAt 两个字段**都不存在**（不是值为空）。
+  // ⚠️ 必须真 delete：赋成 undefined 的话 hasOwnProperty 仍是 true，
+  // _.exists(false) 就挑不到它了，回填用例会「因为挑不到而假装通过」。
+  if (d.legacy) {
+    delete d.legacy;
+    delete d.leadMin;
+    delete d.pushAt;
+  }
   FC.COLLECTIONS.fq_items.push(d);
   return d;
 }
@@ -227,7 +258,8 @@ async function run() {
   {
     seed({ quota: 5 });
     mkItem({ remindAt: Date.now() + 5 * MIN, done: true });        // 做完了
-    mkItem({ remindAt: Date.now() + 30 * MIN });                  // 还没到 10 分钟窗口
+    // 「还没到窗口」现在说的是 pushAt 还没到 —— remindAt 已经不参与发不发的判断
+    mkItem({ remindAt: Date.now() + 30 * MIN, pushAt: Date.now() + 20 * MIN });
     mkItem({ remindAt: null });                                   // 没设提醒
     mkItem({ remindAt: null, pushed: true });                     // 没设提醒且已处理
 
@@ -259,8 +291,9 @@ async function run() {
   console.log('\n[5] 窗口边界：差 1 分钟算迟到补发，差 10 分钟算过期不补');
   {
     seed({ quota: 5 });
-    const late = mkItem({ remindAt: Date.now() - MIN });      // 刚过点 1 分钟 → 补发
-    const old = mkItem({ remindAt: Date.now() - 10 * MIN });  // 过点 10 分钟 → 过期
+    // 迟到容忍看的是 pushAt（该发的时刻过去多久），不是 remindAt
+    const late = mkItem({ remindAt: Date.now() - MIN, pushAt: Date.now() - MIN });           // 刚过点 1 分钟 → 补发
+    const old = mkItem({ remindAt: Date.now() - 10 * MIN, pushAt: Date.now() - 10 * MIN });  // 过点 10 分钟 → 过期
 
     const r = await fn.main();
     eq('刚过点的补发了', r.data.sent, 1);
@@ -271,6 +304,19 @@ async function run() {
     eq('原因可读', row(old._id).pushErr, 'expired');
     eq('过期那条不会再被捞到', (await fn.main()).data.scanned, 0);
     eq('额度只扣了补发的那一条', quotaOf('openid-me'), 4);
+
+    // ⚠️ 到期判据必须是 pushAt，不能退回 remindAt。
+    // 一条「提前 30 天提醒」的事项：提醒时间还在一个月后，但它该发的时刻
+    // 早就过去了。按 remindAt 判会说「还没到期」，然后**永远静默不发** ——
+    // 这是把全局提前量改成逐条之后最容易被忽略的一处，光看 diff 看不出来。
+    const far = mkItem({
+      remindAt: Date.now() + 30 * 24 * HOUR,
+      pushAt: Date.now() - 10 * MIN,
+    });
+    const r2 = await fn.main();
+    eq('提醒时间在未来、但该发时刻已过 → 照样判过期', r2.data.expired, 1);
+    eq('过期原因可读', row(far._id).pushErr, 'expired');
+    eq('没有「因为提醒时间还没到」而静默不发', row(far._id).pushOk, false);
   }
 
   console.log('\n[6] 消息内容：五个槽一个都不能空');
@@ -302,9 +348,11 @@ async function run() {
   console.log('\n[7] 内容兜底：超长截断 / 备注为空 / 分类没了 / 象限异常');
   {
     seed({ quota: 6 });
-    mkItem({ title: '这是一个特别特别特别长的待办事项标题超过二十个字了哦', note: '', remindAt: Date.now() + 5 * MIN });
-    mkItem({ title: 'B', note: '有备注', catId: 'cat-不见了', remindAt: Date.now() + 6 * MIN });
-    mkItem({ title: 'C', note: '有备注', quad: 'q9', remindAt: Date.now() + 7 * MIN });
+    // pushAt 递增，为的是让 calls() 的顺序稳定：三条默认都取 Date.now()，
+    // 同值排序结果不确定，而下面按 cs[0]/cs[1]/cs[2] 取，顺序一飘断言就整体错位。
+    mkItem({ title: '这是一个特别特别特别长的待办事项标题超过二十个字了哦', note: '', remindAt: Date.now() + 5 * MIN, pushAt: Date.now() - 3 * MIN });
+    mkItem({ title: 'B', note: '有备注', catId: 'cat-不见了', remindAt: Date.now() + 6 * MIN, pushAt: Date.now() - 2 * MIN });
+    mkItem({ title: 'C', note: '有备注', quad: 'q9', remindAt: Date.now() + 7 * MIN, pushAt: Date.now() - 1 * MIN });
 
     await fn.main();
     const cs = calls().map(function (c) {
@@ -337,16 +385,22 @@ async function run() {
   console.log('\n[9] 一条提醒 = 一条额度：额度先到先用，用完就停');
   {
     seed({ quota: 2 });
-    const a = mkItem({ title: 'A', remindAt: Date.now() + 1 * MIN });
-    const b = mkItem({ title: 'B', remindAt: Date.now() + 2 * MIN });
-    const c = mkItem({ title: 'C', remindAt: Date.now() + 3 * MIN });
+    // 「先到先发」看的是 pushAt（不再是 remindAt）。三条显式错开 ——
+    // 默认值都是 Date.now()，谁先谁后取决于排序对同值的处理，那是随机的。
+    //
+    // ⚠️ 刻意让两个字段的**顺序相反**：A 的 pushAt 最早、remindAt 却最晚。
+    // 早先三条是同向递增的，结果把 orderBy 从 pushAt 改回 remindAt 也得到
+    // 同样的发出顺序 —— 这条断言成了摆设。变异验证实测抓到了这一点。
+    const a = mkItem({ title: 'A', remindAt: Date.now() + 3 * MIN, pushAt: Date.now() - 3 * MIN });
+    const b = mkItem({ title: 'B', remindAt: Date.now() + 2 * MIN, pushAt: Date.now() - 2 * MIN });
+    const c = mkItem({ title: 'C', remindAt: Date.now() + 1 * MIN, pushAt: Date.now() - 1 * MIN });
 
     const r = await fn.main();
     eq('3 条候选', r.data.scanned, 3);
     eq('额度 2 → 只发 2 条', r.data.sent, 2);
     eq('剩 1 条记未送达', r.data.noQuota, 1);
     eq('额度归零', quotaOf('openid-me'), 0);
-    eq('按提醒时间先到先发：A 发了', row(a._id).pushOk, true);
+    eq('按 pushAt 先到先发：A 发了', row(a._id).pushOk, true);
     eq('B 也发了', row(b._id).pushOk, true);
     eq('C 没发', row(c._id).pushOk, false);
     eq('C 的原因是可读的', row(c._id).pushErr, 'no-quota');
@@ -426,7 +480,86 @@ async function run() {
     });
 
     ok('体验期指向 trial', /const MINI_STATE = 'trial'/.test(remindSrc));
-    ok('提前量是 10 分钟', /const LEAD_MS = 10 \* 60 \* 1000/.test(remindSrc));
+
+    // ---- v8：提前量从「一个全局常量」变成「每条各存一个」 ----
+    // 先钉全局常量的消失：剥掉注释再找（注释里提到历史不算，留着那句解释是对的）。
+    ok('不再有全局提前量常量', !/LEAD_MS/.test(remindSrc.replace(/\/\/[^\n]*/g, '')));
+
+    // ⚠️ 同一份枚举抄了三遍（fqTodo / fqRemind / utils/const.js）—— 云函数不能
+    // require 客户端代码，两个云函数之间也不共享。抄三遍的地方必须有守卫：
+    // 漏改一处的表现是「界面能选、云端不认」，而白名单写法会把它**静默**丢掉。
+    const clientConst = fs.readFileSync(path.join(ROOT, 'miniprogram/utils/const.js'), 'utf8');
+    const allowedOf = function (src) {
+      const m = /const LEAD_ALLOWED = \[([^\]]+)\]/.exec(src);
+      return m ? m[1].replace(/\s+/g, '') : null;
+    };
+    const remindLead = allowedOf(remindSrc);
+    const todoLead = allowedOf(todoSrc);
+    const clientLead = (clientConst.match(/\{ v: (-?\d+), label:/g) || [])
+      .map(function (s) {
+        return /(-?\d+)/.exec(s)[1];
+      })
+      .join(',');
+
+    ok('fqRemind 里有提前量白名单', !!remindLead);
+    eq('fqTodo 与 fqRemind 的白名单逐字相同', todoLead, remindLead);
+    eq('客户端枚举与云端白名单一致', clientLead, remindLead);
+    ok('白名单第一项是「不提醒」哨兵 -1', remindLead.indexOf('-1') === 0);
+    ok(
+      '默认提前量三处都是 30',
+      /const LEAD_DEFAULT = 30/.test(remindSrc) &&
+        /const LEAD_DEFAULT = 30/.test(todoSrc) &&
+        /const LEAD_DEFAULT = 30/.test(clientConst)
+    );
+
+    // 推送时刻必须是「预算好落库」的：fqRemind 只按 pushAt 扫，且到期判据也用它。
+    // 这两条一起被改掉，才会出现「提前 7 天的事按提醒时间判、说自己还没到期」。
+    ok('fqRemind 按 pushAt 扫', /pushAt: _\.and\(_\.gt\(0\), _\.lte\(now\)\)/.test(remindSrc));
+    ok('fqRemind 的到期判据用 pushAt', /const at = Number\(it\.pushAt\)/.test(remindSrc));
+    ok('fqTodo 预算 pushAt', /pushAt: toPushAt\(/.test(todoSrc));
+  }
+
+  console.log('\n[13] 老数据回填：v8 之前的事项没有 pushAt，第一轮就得补上');
+  {
+    seed({ quota: 5 });
+    // 老数据的样子：leadMin 与 pushAt **两个字段都不存在**。
+    // 不补的话这批提醒一条都发不出去 —— 而用户根本不会知道自己有提醒失效了。
+    const legacy = mkItem({ remindAt: Date.now() + 28 * MIN, legacy: true });
+    eq('前提：夹具确实没有 pushAt', 'pushAt' in legacy, false);
+    eq('前提：夹具确实没有 leadMin', 'leadMin' in legacy, false);
+
+    const r = await fn.main();
+    eq('上报回填了 1 条', r.data.backfilled, 1);
+    eq('补上默认提前量 30 分钟', row(legacy._id).leadMin, 30);
+    eq(
+      '补出的 pushAt = 提醒时间 - 30 分钟',
+      row(legacy._id).pushAt,
+      row(legacy._id).remindAt - 30 * 60000
+    );
+    // 28 分钟后的提醒 + 提前 30 分钟 → 该发的时刻是 2 分钟前，正落在迟到容忍内
+    eq('同一条顺手就发出去了', row(legacy._id).pushOk, true);
+
+    const r2 = await fn.main();
+    eq('第二轮不再重复回填', r2.data.backfilled, 0);
+  }
+
+  console.log('\n[14] 「不提醒」的条目：不回填、也不进推送候选');
+  {
+    seed({ quota: 5 });
+    // 新数据：leadMin = -1、pushAt = null（字段存在、值为空）。
+    // 这段守的是「它既不会被回填、也不会被当成候选发出去」。
+    //
+    // ⚠️ 别把这条当成「回填判据必须是 leadMin」的守卫 —— 实测区分不了：
+    // 新数据的 pushAt 字段总在（要么数字、要么 null），老数据两个字段都缺，
+    // 换判据挑出的是同一批文档。判据选 leadMin 更严谨，但那是设计选择，
+    // 不是这条断言守得住的东西。详见 .workbuddy/tmp/mutate-lead.js 里的说明。
+    mkItem({ remindAt: Date.now() + 5 * MIN, leadMin: -1, pushAt: null });
+
+    const r = await fn.main();
+    eq('没有被回填', r.data.backfilled, 0);
+    eq('也不会被当成推送候选', r.data.scanned, 0);
+    eq('额度没动', quotaOf('openid-me'), 5);
+    eq('接口没调', calls().length, 0);
   }
 
   console.log('\n----------------------------------------');

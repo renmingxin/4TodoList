@@ -11,12 +11,16 @@
 //   fq_members     { _openid, fid, role, name, active, joinedAt }
 //   fq_categories  { fid, _openid, name, order, createdAt }
 //   fq_items       { fid, _openid, title, note, quad, catId, priority, progress, done,
-//                    remindAt, order, createdAt, updatedAt, doneAt, doneBy,
+//                    remindAt, leadMin, pushAt, order, createdAt, updatedAt, doneAt, doneBy,
 //                    pushed, pushedAt, pushOk, pushErr }
 //
 //   · progress 是 0~100 的整数（v7 新增）。它和 done **不是两个字段，而是同一条
 //     状态线的两种读法**：落库后永远满足 done ⟺ progress === 100。耦合钉在
 //     updateItem 里（见那段注释）—— 客户端送哪一个都会把另一个推到位。
+//   · leadMin / pushAt 是**一对**（v8 新增）。leadMin = 提前多少分钟提醒
+//     （白名单见 LEAD_ALLOWED，**-1 表示不提醒**）；pushAt = 预算好的推送时刻
+//     = remindAt - leadMin * 60000。两个都落库而不是查询时现算，理由写在
+//     toPushAt 上面 —— 一句话：fqRemind 没法用单一扫描窗口表达逐条不同的提前量。
 //   fq_plans       { fid, _openid, date, text, updatedAt }
 //   fq_subs        { _openid, quota, lastGrantAt, updatedAt }
 //
@@ -86,6 +90,20 @@ const MAX_QUOTA = 50;
 // 它拦的是脚本连点。
 const GRANT_MIN_MS = 300;
 
+// 提前提醒时长的白名单（分钟）。与 utils/const.js 的 LEAD_OPTIONS、
+// fqRemind 的 LEAD_ALLOWED 是**同一份东西**，三处必须一起改 ——
+// 云函数不能 require 客户端代码，两个云函数之间也不共享，只能各留一份；
+// test-remind.js 会读三份源码逐一比对，漏改一处就红。
+//
+// ⚠️ **-1 专指「不提醒」，不是「提前 0 分钟」。** 为什么不用 0 当这个哨兵值：
+//    toLead() 会把白名单之外的任何值回落到默认值，而 0 若是个合法档位，
+//    一个脏值（老数据的 null、前端手滑传的字符串）就会把这条提醒**悄悄关掉**
+//    —— 用户以为提醒开着，实际永远不发，这是最糟的失败方向。
+//    用 -1 之后 0 不在白名单里，脏值只会回落成「提前 30 分钟」，失败方向是
+//    「发得比预期早」，用户看得见、也改得回来。
+const LEAD_ALLOWED = [-1, 5, 10, 30, 60, 180, 1440, 4320, 10080, 43200];
+const LEAD_DEFAULT = 30;
+
 // 邀请码：6 位，去掉 0/O/1/I/L 这些看起来像的字符
 const CODE_CHARS = '23456789ABCDEFGHJKMNPQRSTUVWXYZ';
 const CODE_LEN = 6;
@@ -107,13 +125,18 @@ const INVITE_TTL = 24 * 60 * 60 * 1000;
             bootstrap / sync 多回一个 plans 字段。
    v6 → v7：事项进度条。fq_items 多出 progress 字段，且 updateItem 里多了
             「progress 与 done 互为充要条件」这条耦合。
+   v7 → v8：可配置的提前提醒时长。fq_items 多出 leadMin 与 pushAt 一对字段
+            （pushAt = 预计算的推送时刻），fqRemind 的扫描条件从 remindAt 换成
+            pushAt。⚠️ 这次 fqRemind 也必须重新部署 —— 它不在 action 清单里，
+            握手管不到它，靠版本号提醒你自己记得。
    客户端首屏 bootstrap 会拿这个值做握手，对不上直接弹窗告诉你重新部署。
 
-   ⚠️ v7 这次**没有**新增 action，为什么照样 +1：旧云函数不认识 progress，
+   ⚠️ v7 和 v8 这两次**都没有**新增 action，为什么照样 +1：旧云函数不认识新字段，
    客户端送上去会被它静默丢掉（白名单写法，没列进去的字段一律无视）——
-   表现是「拖完进度条看着生效了，一刷新全回到 0%」。这正是握手要拦的那类
+   v7 的表现是「拖完进度条看着生效了，一刷新全回到 0%」，v8 的表现是
+   「选好的提前量重进一次就变回 30 分钟」。这正是握手要拦的那类
    「代码明明对却悄无声息」的故障，所以版本号必须动。 */
-const FN_VER = 7;
+const FN_VER = 8;
 
 const ACTIONS = [
   'bootstrap',
@@ -162,11 +185,38 @@ function toProgress(v) {
 }
 
 // remindAt 存毫秒时间戳；空值/非法值一律落 null。
-// 到点前 10 分钟由 fqRemind 依据它推送（见那个云函数）。
+// ⚠️ v8 起 fqRemind **不再直接读它** —— 推送看的是下面算出来的 pushAt。
 function toRemind(v) {
   if (v === null || v === undefined || v === '') return null;
   const n = Number(v);
   return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
+}
+
+// 提前量净化：白名单之外的（undefined / null / NaN / 字符串 / 小数）
+// 一律回落到 LEAD_DEFAULT，**绝不回落成 -1**（理由见 LEAD_ALLOWED 上面那段）。
+function toLead(v) {
+  const n = Math.round(Number(v));
+  return LEAD_ALLOWED.indexOf(n) >= 0 ? n : LEAD_DEFAULT;
+}
+
+// 预计算「推送时刻」= 提醒时间 - 提前量。落库而不是查询时现算，是被逼出来的：
+//
+//   · 原来的写法是 fqRemind 里一个全局 LEAD_MS，扫描条件 `remindAt <= now + LEAD_MS`。
+//     每条事项各带提前量之后，这个**单一窗口表达不了**「A 条提前 5 分钟、B 条提前 7 天」
+//     —— 它们该发的时刻之间毫无关系。
+//   · 看似可行的替代是把窗口放宽到最大档（30 天），再在内存里逐条算 pushAt 过滤。
+//     但 fqRemind 的拉取有上限（CAP = 500）：未来 30 天内若超过 500 条待推事项，
+//     排在后面的会被**静默丢弃** —— 又一个「不报错、就是不发」的坑。
+//   · 落成 pushAt 之后，扫描条件回到单一的 `pushAt <= now`，语义与索引都干净，
+//     代价只是每次 remindAt / leadMin 变化时重算一次。
+//
+// 不提醒（-1）或压根没设提醒时间 → null。fqRemind 的条件里带 _.gt(0)，
+// 自然挑不到它们，也就不会误发。
+function toPushAt(remindAt, leadMin) {
+  const at = Number(remindAt);
+  if (!Number.isFinite(at) || at <= 0) return null;
+  if (leadMin === -1) return null;
+  return at - leadMin * 60000;
 }
 
 // order 存整数。客户端每次重排都整段写成 0 / 10 / 20…，
@@ -406,6 +456,11 @@ async function seed(openid, fid) {
         progress: 0,
         done: false,
         remindAt: it.remind ? tmr.getTime() : null,
+        // 种子也是**新数据**，提前量按默认档落库。不落的话，fqRemind 的
+        // 老数据回填会把它们当成「v8 之前的遗留」再补一遍 —— 结果一样，
+        // 但白做一次写、也让「老数据」这个判断失焦。
+        leadMin: it.remind ? LEAD_DEFAULT : null,
+        pushAt: it.remind ? toPushAt(tmr.getTime(), LEAD_DEFAULT) : null,
         order: 1000 + i, // 种子数据排在新增事项之前
         createdAt: db.serverDate(),
         updatedAt: db.serverDate(),
@@ -501,6 +556,11 @@ async function addItem(openid, event) {
   const owned = await db.collection(COL_CATS).where({ _id: catId, fid: ctx.fid }).count();
   if (owned.total === 0) throw new Error('分类不存在');
 
+  // 提醒这一组三个字段是**一起算出来的**，所以先在外面算好再落库：
+  // leadMin 只在真设了提醒时间时才有值 —— 没有提醒时间就没有「提前多久」可言。
+  const remindAt = toRemind(src.remindAt);
+  const leadMin = remindAt === null ? null : toLead(src.leadMin);
+
   const res = await db.collection(COL_ITEMS).add({
     data: {
       fid: ctx.fid,
@@ -514,7 +574,9 @@ async function addItem(openid, event) {
       // 就不再是两种含义：老数据的缺省由客户端按 done 推出来（见 rowVM）。
       progress: 0,
       done: false,
-      remindAt: toRemind(src.remindAt),
+      remindAt: remindAt,
+      leadMin: leadMin,
+      pushAt: toPushAt(remindAt, leadMin),
       // pushed 系列由 fqRemind 消费。新建时显式落 false（而不是留空），
       // 查询条件里那些 _.neq(true) 就能少一层「字段不存在」的含糊。
       pushed: false,
@@ -544,17 +606,33 @@ async function updateItem(openid, event) {
   if (src.note !== undefined) patch.note = toStr(src.note, MAX_NOTE);
   if (src.quad !== undefined) patch.quad = toQuad(src.quad);
   if (src.priority !== undefined) patch.priority = toPriority(src.priority);
-  if (src.remindAt !== undefined) {
-    const next = toRemind(src.remindAt);
-    patch.remindAt = next;
-
-    // 提醒时间**真的变了** → 把推送状态复位，让它重新走一遍队列。
-    // 为什么要先读一次旧值：客户端每次保存都会带上 remindAt（哪怕没动过它），
-    // 若无脑复位，用户只是想改个标题，那条已经推过的提醒就会被重新排进队列，
-    // 到点再发一条重复的 —— 而每条消息都要烧掉一条攒来的额度。
+  // 提醒这一组：remindAt 与 leadMin 任一进来，三个字段就一起重算 ——
+  // 它们不是独立字段，pushAt 完全由前两个决定，分开更新必然算出个中间态。
+  if (src.remindAt !== undefined || src.leadMin !== undefined) {
+    // 先读旧值。客户端每次保存都会把 remindAt / leadMin 一起带上（哪怕没动过），
+    // 若无脑复位推送状态，用户只是想改个标题，那条已经推过的提醒就会被重新排进
+    // 队列、到点再发一条重复的 —— 而每条消息都要烧掉一条攒来的额度。
     const cur = await db.collection(COL_ITEMS).where({ _id: id, fid: ctx.fid }).limit(1).get();
-    const before = cur.data.length ? toRemind(cur.data[0].remindAt) : null;
-    if (before !== next) {
+    const old = cur.data.length ? cur.data[0] : {};
+
+    const oldAt = toRemind(old.remindAt);
+    // ⚠️ 老数据（v8 之前）没有 leadMin，这里必须按默认值补齐而不是落成 null：
+    // 否则「用户只改了个标题」会被判成「提前量从 30 变成了 null」，白白复位推送状态。
+    const oldLead = oldAt === null ? null : toLead(old.leadMin);
+
+    const nextAt = src.remindAt !== undefined ? toRemind(src.remindAt) : oldAt;
+    // 没传 leadMin 就沿用旧值；旧值也拿不到（老数据）时 toLead(null) 会回落成
+    // LEAD_DEFAULT —— 正是我们要的「默认 30 分钟」。nextAt 为空则必须是 null：
+    // 没有提醒时间就谈不上「提前多久」。
+    const nextLead =
+      nextAt === null ? null : toLead(src.leadMin !== undefined ? src.leadMin : oldLead);
+
+    patch.remindAt = nextAt;
+    patch.leadMin = nextLead;
+    patch.pushAt = toPushAt(nextAt, nextLead);
+
+    // 只有「提醒时间」或「提前量」**真的变了**才复位推送状态。
+    if (oldAt !== nextAt || oldLead !== nextLead) {
       patch.pushed = false;
       patch.pushedAt = null;
       patch.pushOk = false;

@@ -1337,8 +1337,13 @@ console.log('\n[23] 提醒推送视图层防回归（v5）');
   // ---- 攒额度：一个入口、一个条件、一种结果才算数 ----
   const subs = js.match(/wx\.requestSubscribeMessage\(\{/g) || [];
   eq('弹授权的地方全文件只有一处（没有旁路补额度的入口）', subs.length, 1);
-  eq('只在保存带提醒的事项时请求', /if \(remindAt\) this\.askSubscribe\(\);/.test(js), true);
+  // v8：条件多了「且提前量不是『不提醒』」—— 用户已经明说不要通知，就不该再弹订阅框。
+  eq('只在保存带提醒的事项时请求', /if \(remindAt && leadMin !== -1\) this\.askSubscribe\(\);/.test(js), true);
+  eq('提前量只在真有提醒时间时才算', /const leadMin = remindAt\s*\?\s*\(LEAD_OPTIONS\[f\.leadIdx\]/.test(js), true);
+  eq('保存时把 leadMin 一起送给云函数', /leadMin: leadMin,/.test(js), true);
   eq('只有用户点了「允许」才记账', /res\[tpl\] === 'accept'/.test(js), true);
+  // v8：拒绝要当场说，不能等「N 条提醒未送达」在几天后聚出来才知道。
+  eq('授权被拒时当场提示', /未授权，这条提醒不会推送到微信/.test(js), true);
   eq('grantSub 只传模板 id（加多少由服务端定）', /callCloud\('grantSub', \{ templateId: tpl \}\)/.test(js), true);
   // 写操作名单现在住在 utils/const.js，所以这条也要查整个客户端
   eq('grantSub 占住同步避让名额', /'grantSub',\n\]/.test(CLIENT_JS), true);
@@ -1372,6 +1377,58 @@ console.log('\n[23] 提醒推送视图层防回归（v5）');
   m.adoptSub(null);
   eq('服务端没给 sub 时不炸', m.data.subQuota, 0);
   eq('也不清掉已有的模板 id', m.subTpl, 'TPL-X');
+
+  /* ---- v8：提前量的本地镜像 ----
+     抽屉重开时读的是 `item.leadMin`，而落库是异步的。镜像漏写不会报任何错，
+     表现是「刚选的提前量，重开一次就变回默认档」—— 与「云端还是旧包」那个
+     故障长得一模一样。所以这条断言的价值不只是「守住乐观更新」，更是**把两个
+     成因分开**：这里红了，就不是云函数没部署。 */
+  {
+    const p = ctx([['a', 'q1', false, 10]], 'detail');
+    const it = p.findItem('a');
+    it.remindAt = Date.now() + 3 * 3600 * 1000;
+    it.leadMin = 5;
+    p.openForm(it);
+    eq('抽屉预选的是这条自己的提前量（不是默认档）', p.data.form.leadLabel, '提前 5 分钟');
+    eq('下拉枚举首项是「不提醒」', p.data.leadLabels[0], '不提醒');
+    eq('枚举项数与 utils/const.js 的 LEAD_OPTIONS 一致',
+       p.data.leadLabels.length, (CONST_JS.match(/\{ v: /g) || []).length);
+
+    const idx = p.data.leadLabels.indexOf('提前 1 天');
+    p.onLead({ detail: { value: String(idx) } });
+    eq('选完立刻回显', p.data.form.leadLabel, '提前 1 天');
+
+    cloudCalls.length = 0;
+    p.onSave();
+    eq('落库把 leadMin 一起送', last().patch.leadMin, 1440);
+    eq('本地镜像也跟着变（漏了这步，重开抽屉就会变回旧值）', p.findItem('a').leadMin, 1440);
+
+    p.openForm(p.findItem('a'));
+    eq('重开抽屉看到的是刚才选的那档', p.data.form.leadLabel, '提前 1 天');
+    p.onClearRemind();
+    eq('清除提醒时间后提前量复位成默认档', p.data.form.leadLabel, '提前 30 分钟');
+    eq('清除后也不再有提醒时间', p.data.form.hasRemind, false);
+
+    // 新建这条路：云函数返回 _id 之后客户端才往镜像里 push 那一条（异步）。
+    // 这里只钉**发出去的那一份**，镜像那半交给下面那条静态断言 ——
+    // 把异步分支写成同步断言，得到的会是假绿。
+    cloudCalls.length = 0;
+    const p2 = ctx([], 'detail');
+    p2.openForm(null, 'q1');
+    p2.setData({
+      'form.title': '新事项',
+      'form.hasRemind': true,
+      'form.date': '2026-10-20',
+      'form.time': '09:00',
+    });
+    const i2 = p2.data.leadLabels.indexOf('提前 3 小时');
+    p2.onLead({ detail: { value: String(i2) } });
+    p2.onSave();
+    eq('新建也把 leadMin 送上去', last().item.leadMin, 180);
+    eq('新建落的是 addItem', last().action, 'addItem');
+  }
+  eq('新建后镜像里那条也带 leadMin（静态）',
+     /leadMin: payload\.leadMin,/.test(js), true);
 }
 
 /* ==================================================================

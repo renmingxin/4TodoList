@@ -23,11 +23,51 @@ const {
   REORDER_CAP,
   FN_VER,
   SYNC_MS,
+  LEAD_OPTIONS,
+  LEAD_DEFAULT,
   WATER_GOAL,
   WATER_KEY,
   PLAN_MAX,
   CAL_CELLS,
 } = require('../../utils/const.js');
+
+/* ---------------- 提前提醒（v8）：三个顶层换算 ----------------
+   存的是**下标**而不是分钟值：picker 的 value 本来就吃下标，来回换算一次只会
+   多一个出错的地方；真正要落库的分钟值在 onSave 里由下标取出来。
+
+   ⚠️ 默认档用 findIndex 找，不写死 3 —— 将来往枚举中间插一档（比如「提前 45 分钟」），
+   写死的下标会**静默**指到别的档位上，而 findIndex 不会。 */
+const LEAD_LABELS = LEAD_OPTIONS.map(function (o) {
+  return o.label;
+});
+
+const LEAD_DEFAULT_IDX = Math.max(
+  0,
+  LEAD_OPTIONS.findIndex(function (o) {
+    return o.v === LEAD_DEFAULT;
+  })
+);
+
+// 分钟值 → 文案。渲染「我的」页那行提示、以及抽屉里当前档位都要用。
+// 查不到（存的是一个已下架的档位，或老数据的 undefined）就退回默认档的文案，
+// 宁可显示「提前 30 分钟」也不要给用户看一个空白。
+function leadLabel(v) {
+  const n = Number(v);
+  const hit = LEAD_OPTIONS.filter(function (o) {
+    return o.v === n;
+  })[0];
+  return hit ? hit.label : LEAD_LABELS[LEAD_DEFAULT_IDX];
+}
+
+// 分钟值 → 下标。老数据没有 leadMin（undefined）→ 回落默认档，
+// 这正是「默认 30 分钟」对存量数据生效的地方。
+function leadIndex(v) {
+  const n = Number(v);
+  const i = LEAD_OPTIONS.findIndex(function (o) {
+    return o.v === n;
+  });
+  return i >= 0 ? i : LEAD_DEFAULT_IDX;
+}
 const {
   pad2,
   todayStr,
@@ -198,8 +238,16 @@ const pageDef = {
       time: '09:00',
       hasRemind: false,
       dateLabel: '不提醒',
+      // 提前提醒时长（v8）。只在 hasRemind 为真时才出现在界面上 ——
+      // 没有提醒时间就谈不上「提前多久」。这里先落默认档占位，
+      // 真正的回填在 openForm 里按每条事项自己的 leadMin 做。
+      leadIdx: LEAD_DEFAULT_IDX,
+      leadLabel: LEAD_LABELS[LEAD_DEFAULT_IDX],
     },
     saveLabel: '保存',
+    // 「提前提醒」picker 的 range 吃一个字符串数组，而模板里做不了 map，
+    // 所以在 data 里摊平一次。它整场不变，setData 也就只在初始化时带上一次。
+    leadLabels: LEAD_LABELS,
   },
 
   /* ================= 生命周期 ================= */
@@ -401,7 +449,11 @@ const pageDef = {
   /* 请求一次订阅授权，用户点了「允许」才回来记账。
      个人主体只有一次性订阅：一次允许 = 一条发送权，攒够几条就能发几条。
      用户勾过「总是保持以上选择」之后，这里**不再弹窗**、但授权次数照常 +1，
-     所以体感就是「点一下保存就完事」。 */
+     所以体感就是「点一下保存就完事」。
+
+     ⚠️ v8 起调用方只在「设了提醒时间、且提前量不是『不提醒』」时才进来
+     （见 onSave）。选了「不提醒」还弹订阅框，既是骚扰，也不符合微信对
+     「订阅要有真实触发场景」的要求。 */
   askSubscribe() {
     const tpl = this.subTpl;
     if (!tpl || !wx.requestSubscribeMessage) return;  // 首屏还没回来就静默跳过
@@ -411,7 +463,22 @@ const pageDef = {
       success(res) {
         // 只有 accept 才算攒到一条。reject（用户点了拒绝）/ ban（被后台限制）
         // / filter 都不给额度 —— 给了的话，第 N 次发送会被微信直接拒掉。
-        if (res && res[tpl] === 'accept') that.grantQuota();
+        if (res && res[tpl] === 'accept') {
+          that.grantQuota();
+          return;
+        }
+        // v8：拒绝时给一次明确反馈。以前这里是纯静默的，理由是「没额度」会在
+        // 「我的」页聚合成一条「N 条提醒未送达」—— 但那要等**提醒到点之后**才
+        // 看得见。中间这几天用户会一直以为提醒是好的，直到没收到才回头怀疑，
+        // 而那时已经错过一次了。把反馈提前到「设的那一刻」。
+        //
+        // ⚠️ 只用 toast：不弹 modal、更不改数据。用户可能只是手滑点了拒绝，
+        // 拦一个弹窗逼他重新选，比不提醒本身还烦人。
+        wx.showToast({
+          title: '未授权，这条提醒不会推送到微信',
+          icon: 'none',
+          duration: 2600,
+        });
       },
       fail() {
         // 环境不支持或调用被限，当没发生过。提醒本身已经存下了，
@@ -1669,6 +1736,12 @@ const pageDef = {
       time: d ? pad2(d.getHours()) + ':' + pad2(d.getMinutes()) : '09:00',
       hasRemind: !!d,
       dateLabel: '不提醒',
+      // 老数据（v8 之前）没有 leadMin → leadIndex 回落默认档，这就是
+      // 「默认提前 30 分钟」对存量事项生效的位置。
+      // ⚠️ 只读 item.leadMin，**不看** item.pushAt：pushAt 是从它推出来的，
+      // 拿结果反推输入等于把同一件事算两遍，迟早对不上。
+      leadIdx: leadIndex(item ? item.leadMin : LEAD_DEFAULT),
+      leadLabel: leadLabel(item ? item.leadMin : LEAD_DEFAULT),
     };
     if (d) form.dateLabel = remindDayShort(form.date, form.time);
 
@@ -1737,8 +1810,28 @@ const pageDef = {
     });
   },
 
+  // 提前提醒时长（v8）。picker 给的本来就是下标，直接存下标 ——
+  // 分钟值只在 onSave 里由下标取一次，省掉「存进去再换算回来」这条容易对不上的路。
+  // 越界（理论上来不了，但 picker 的 value 是数字）回落默认档，不写 undefined 进 data。
+  onLead(e) {
+    const i = Number(e.detail.value);
+    const idx = Number.isFinite(i) && LEAD_OPTIONS[i] ? i : LEAD_DEFAULT_IDX;
+    this.setData({
+      'form.leadIdx': idx,
+      'form.leadLabel': LEAD_OPTIONS[idx].label,
+    });
+  },
+
   onClearRemind() {
-    this.setData({ 'form.hasRemind': false, 'form.dateLabel': '不提醒' });
+    // 一并把提前量复位成默认档：清除提醒时间后，云函数会把 remindAt / leadMin /
+    // pushAt 一起落成 null，抽屉里整块选择器也随之消失。
+    // 留个残值在 form 里没意义，下次打开又是另一个事项的数据。
+    this.setData({
+      'form.hasRemind': false,
+      'form.dateLabel': '不提醒',
+      'form.leadIdx': LEAD_DEFAULT_IDX,
+      'form.leadLabel': LEAD_LABELS[LEAD_DEFAULT_IDX],
+    });
   },
 
   onSave() {
@@ -1749,6 +1842,11 @@ const pageDef = {
       return;
     }
     const remindAt = f.hasRemind ? toTimestamp(f.date, f.time) : null;
+    // 提前量只在真有提醒时间时才有意义。没有提醒时间 → null，
+    // 云函数那边是同一套判断（它还会再净化一次，这里只是不主动送脏值）。
+    const leadMin = remindAt
+      ? (LEAD_OPTIONS[f.leadIdx] || LEAD_OPTIONS[LEAD_DEFAULT_IDX]).v
+      : null;
     const payload = {
       title: title,
       note: String(f.note || '').trim(),
@@ -1756,6 +1854,7 @@ const pageDef = {
       catId: f.catId,
       priority: f.priority,
       remindAt: remindAt,
+      leadMin: leadMin,
     };
 
     const that = this;
@@ -1765,7 +1864,13 @@ const pageDef = {
     // 「带提醒的保存」= 顺手攒一条推送额度。
     // 必须在这里同步调用：requestSubscribeMessage 要求「在用户交互后」调，
     // 此刻还在这一次 tap 的调用栈里；挪到 callCloud 的 then 里就会被判不合规。
-    if (remindAt) this.askSubscribe();
+    //
+    // ⚠️ v8：选了「不提醒」就**根本不请求授权**。两条理由，一条体验一条合规：
+    //   ① 用户已经明说不要通知了，再弹订阅框是纯粹的骚扰，而且他会犯嘀咕
+    //      「我都选不提醒了，怎么还非要我授权」；
+    //   ② 微信要求 requestSubscribeMessage 有真实触发场景，拿一个不会用来推送的
+    //      事项去换一次授权，属于滥用订阅能力。
+    if (remindAt && leadMin !== -1) this.askSubscribe();
 
     if (isEdit) {
       const it = this.findItem(f.id);
@@ -1778,6 +1883,11 @@ const pageDef = {
           it.catId = payload.catId;
           it.priority = payload.priority;
           it.remindAt = payload.remindAt;
+          // ⚠️ leadMin 也必须一起落到本地镜像：抽屉重开时读的就是它（openForm 只看
+          // item.leadMin）。漏了这一行不会报任何错，只是「刚选的提前量，重开一次就
+          // 变回 30 分钟」—— 而那正是 v8 握手专门要拦的那个故障现象，
+          // 区别只在于这次是客户端自己把镜像写漏了。
+          it.leadMin = payload.leadMin;
         },
         callCloud('updateItem', { id: f.id, patch: payload })
       );
@@ -1793,6 +1903,8 @@ const pageDef = {
             priority: payload.priority,
             done: false,
             remindAt: payload.remindAt,
+            // 与上面编辑分支同理：镜像里得有 leadMin，否则「刚建好就去改」会看到默认档
+            leadMin: payload.leadMin,
             // 新事项排在末尾（排序值最大），与云函数 addItem 的写法一致
             order: Date.now(),
           });

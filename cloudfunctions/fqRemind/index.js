@@ -9,7 +9,7 @@
 // 不碰家庭、不碰分类、不碰任何增删改的业务逻辑。
 //
 // 集合（与前两个函数同一套）：
-//   fq_items  { ..., _openid, fid, title, note, quad, catId, remindAt,
+//   fq_items  { ..., _openid, fid, title, note, quad, catId, remindAt, leadMin, pushAt,
 //               pushed, pushedAt, pushOk, pushErr }
 //   fq_categories { _id, fid, name }
 //   fq_subs   { _openid, quota, lastGrantAt, updatedAt }
@@ -35,8 +35,8 @@
 // · 额度在「扣了但发送失败」时不退还。正常失败（43101 用户拒收、
 //   模板字段超限）里，额度其实已经真被消耗掉了，退了反而记账不准；
 //   网络抖动这种小概率事件，退与不退都说得过去，选了简单的那边。
-// · 一条提醒只发一次。发出去之后用户改了提醒时间，由 fqTodo 的
-//   updateItem 把 pushed 复位，它才重新排进队列（见那边「提醒时间真的变了」）。
+// · 一条提醒只发一次。发出去之后用户改了提醒时间**或提前量**，由 fqTodo 的
+//   updateItem 把 pushed 复位、pushAt 重算，它才重新排进队列（见那边「提醒这一组」）。
 
 const cloud = require('wx-server-sdk');
 
@@ -61,9 +61,14 @@ const MINI_STATE = 'trial';
 
 const PAGE_PATH = 'pages/index/index';
 
-// 提前量：在提醒时间前 10 分钟发出去。
-// 触发器最小粒度是分钟，所以实际提前量落在 9~10 分钟之间。
-const LEAD_MS = 10 * 60 * 1000;
+// ⚠️ v8 起这里**没有全局提前量**了：每条事项各带一个 leadMin，推送时刻由
+// fqTodo 预算成 pushAt 落库，本函数只按 pushAt 扫（见 fetchDue）。
+// 下面这对常量如今只服务「老数据回填」（backfillPushAt）—— 那批文档没有
+// leadMin，得按默认值补，而这个默认值必须与 fqTodo 的 LEAD_DEFAULT 完全一致，
+// 否则升级那一刻同一批数据会在两边算出不同的推送时刻。
+// 三份白名单（fqTodo / 本文件 / utils/const.js）由 test-remind.js 读源码比对。
+const LEAD_ALLOWED = [-1, 5, 10, 30, 60, 180, 1440, 4320, 10080, 43200];
+const LEAD_DEFAULT = 30;
 
 // 迟到容忍：超过这个还没发出去，就别补发了 ——
 // 一条几小时前的提醒突然弹出来只会让人困惑。但也不能静默丢弃，
@@ -87,6 +92,22 @@ const QUAD_NAME = {
 };
 
 /* ---------------- 工具 ---------------- */
+
+// 提前量净化 + 推送时刻推算。与 fqTodo 里的同名函数**逐字一致** ——
+// 两个云函数不共享代码，只能各留一份，靠 test-remind 读源码比对防漂移。
+// 回填老数据时必然用到，所以放在这里而不是内联：让「两边算法相同」这件事
+// 在源码层面看得见、也测得到。
+function toLead(v) {
+  const n = Math.round(Number(v));
+  return LEAD_ALLOWED.indexOf(n) >= 0 ? n : LEAD_DEFAULT;
+}
+
+function toPushAt(remindAt, leadMin) {
+  const at = Number(remindAt);
+  if (!Number.isFinite(at) || at <= 0) return null;
+  if (leadMin === -1) return null;
+  return at - leadMin * 60000;
+}
 
 function pad2(n) {
   return n < 10 ? '0' + n : '' + n;
@@ -149,23 +170,26 @@ async function catName(catId, fid) {
 
 /* ---------------- 捞出待处理 ---------------- */
 
-async function fetchDue(maxTs) {
+async function fetchDue(now) {
   const out = [];
   let skip = 0;
   for (let i = 0; i < CAP / PAGE; i++) {
     const res = await db
       .collection(COL_ITEMS)
       .where({
-        // 必须是 and(gt(0), lte(t))，不能只写 lte(t)：
-        // remindAt 为 null 的文档在 $lte 下也会被捞出来（null 在类型序里排在数字之前），
-        // 那会把「压根没设提醒」的条目全卷进来，白占分页窗口。
-        remindAt: _.and(_.gt(0), _.lte(maxTs)),
+        // 必须是 and(gt(0), lte(now))，不能只写 lte(now)：
+        // pushAt 为 null 的文档（= 选了「不提醒」或压根没设提醒时间）在 $lte 下
+        // 也会被捞出来（null 在类型序里排在数字之前），白占分页窗口。
+        //
+        // ⚠️ 千万不要改回「remindAt + 固定提前量」：每条事项的提前量各不相同，
+        // 单一窗口表达不了（完整理由见 fqTodo 的 toPushAt 注释）。
+        pushAt: _.and(_.gt(0), _.lte(now)),
         // 用 neq(true) 而不是等值 false：升级上来的老文档没有这个字段，
         // 等值条件挑不到它们，那批提醒就永远不会被处理。
         pushed: _.neq(true),
         done: _.neq(true),
       })
-      .orderBy('remindAt', 'asc')
+      .orderBy('pushAt', 'asc')
       .skip(skip)
       .limit(PAGE)
       .get();
@@ -174,6 +198,59 @@ async function fetchDue(maxTs) {
     skip += PAGE;
   }
   return out;
+}
+
+// 老数据回填：v8 之前没有 pushAt 字段（那时提前量是全局常量，用不着预计算），
+// fqRemind 改按 pushAt 扫之后，这批提醒会**一条都挑不到**。
+//
+// 为什么不要求用户手动迁移：这是典型的「静默漏掉」—— 用户不会知道自己
+// 有 30 条提醒不再生效了。每轮 tick 顺手补一页，补过之后就挑不到它们了，
+// 开销随老数据减少而趋近于零。
+//
+// ⚠️ 判据用 **leadMin 缺失**，不是 pushAt 缺失：选了「不提醒」的新数据
+// pushAt 落的是 null（字段存在、值为空），拿 pushAt 当判据会反复扫到它、
+// 无限回填。leadMin 和 pushAt 是同一次改动引入的，两者必同生同灭，
+// 所以 leadMin 缺失 ⇔ 老数据，这个判据是干净的。
+//
+// 用**默认提前量**补齐：老数据一定也没 leadMin，没有更好的信息可依据。
+// ⚠️ 副作用是有意的、需要记住的：存量事项的提前量会从原来写死的 10 分钟
+// 变成 30 分钟 —— 否则「默认 30 分钟」这条规则对老用户就不成立。
+async function backfillPushAt() {
+  let fixed = 0;
+  // 单轮最多补 5 页，避免某次 tick 长时间占着。触发器每分钟就来一次，足够补完。
+  for (let round = 0; round < 5; round++) {
+    let res;
+    try {
+      res = await db
+        .collection(COL_ITEMS)
+        .where({
+          leadMin: _.exists(false),
+          remindAt: _.and(_.gt(0)),
+          pushed: _.neq(true),
+          done: _.neq(true),
+        })
+        .limit(PAGE)
+        .get();
+    } catch (e) {
+      return fixed;
+    }
+    if (!res.data.length) break;
+
+    for (const it of res.data) {
+      const at = Number(it.remindAt);
+      const lead = toLead(it.leadMin); // 缺失 → 回落 LEAD_DEFAULT
+      try {
+        await db.collection(COL_ITEMS).doc(it._id).update({
+          data: { leadMin: lead, pushAt: toPushAt(at, lead) },
+        });
+        fixed++;
+      } catch (e) {
+        /* 单条补不上不拖崩整轮，下一轮还会再来捡它 */
+      }
+    }
+    if (res.data.length < PAGE) break;
+  }
+  return fixed;
 }
 
 // 抢锁。返回 true 表示「这一条归我了」。
@@ -239,13 +316,27 @@ async function push(item) {
 
 exports.main = async () => {
   const now = Date.now();
-  const rows = await fetchDue(now + LEAD_MS);
-  const stat = { scanned: rows.length, sent: 0, expired: 0, noQuota: 0, failed: 0, skipped: 0 };
+  // 顺序不能反：先把老数据补上 pushAt，再按 pushAt 扫。
+  // 反过来的话，刚升级的那一轮会把存量提醒整批漏掉（它们本来就不在扫描范围里）。
+  const backfilled = await backfillPushAt();
+  const rows = await fetchDue(now);
+  const stat = {
+    scanned: rows.length,
+    backfilled: backfilled,
+    sent: 0,
+    expired: 0,
+    noQuota: 0,
+    failed: 0,
+    skipped: 0,
+  };
   const touched = new Set();
 
   for (let i = 0; i < rows.length; i++) {
     const it = rows[i];
-    const at = Number(it.remindAt);
+    // 判据是 pushAt，不是 remindAt：现在「该发的时刻」由每条自己的提前量决定，
+    // remindAt 只是它的一个输入。到期容忍也跟着改按 pushAt 算 ——
+    // 一条提前 7 天的事项迟到 6 天仍旧该发，而按 remindAt 判反而会说「还没到期」。
+    const at = Number(it.pushAt);
     if (!Number.isFinite(at) || at <= 0) continue;
 
     // 早就过点了：容器冷启动、触发器漏跑都会造成这个。

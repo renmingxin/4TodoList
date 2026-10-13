@@ -8,11 +8,12 @@
 
 ## 一、云函数 fqTodo 补充
 
-### 1.1 action 清单（18 个）
+### 1.1 action 清单（19 个）
 
 `bootstrap` / `sync` / `addItem` / `updateItem` / `removeItem` / `reorder` / `bulk`
 （markAllDone·clearDone·clearQuad）/ `clearDone` / `clearAll` / `addCategory` / `removeCategory` /
-`renameCategory` / `genInvite` / `joinFamily` / `leaveFamily` / `renameMember` / `renameFamily` / `grantSub`。
+`renameCategory` / `savePlan` / `genInvite` / `joinFamily` / `leaveFamily` / `renameMember` /
+`renameFamily` / `grantSub`。
 
 每个 action 第一步都是 `ensureFamily(OPENID)`；入参统一长度截断 + 类型收敛；引用 `catId` 二次校验归属。
 返回信封统一 `{ok, data|msg}`，抛异常只回传 message（不透传堆栈）。
@@ -21,11 +22,12 @@
 ### 1.2 集合与共享家庭（v3）
 
 **一个家庭 = 一份共享清单。** 首次进入自动拿到「我的家庭」；加入对方家庭 = **切换当前家庭**，
-不搬运也不删数据，退出即回自己那份。集合共 **5** 个：
+不搬运也不删数据，退出即回自己那份。集合共 **6** 个：
 
 - `fq_family{name,ownerOpenid,inviteCode,inviteExpire,rev,createdAt}`
 - `fq_members{_openid,fid,role,name,active,joinedAt}`
 - `fq_categories` / `fq_items`（各带 `fid`）/ `fq_subs`
+- `fq_plans{_openid,fid,date,text,updatedAt}`（v6 日程，**按人**存，唯一键 `(fid,_openid,date)`，见 §八）
 
 **`_openid` 降级成「谁创建的」（审计用），不参与过滤。** 一个人可属多个家庭，但 `active:true` 只有一条。
 
@@ -71,7 +73,7 @@
 
 | 文件 | 内容 |
 |---|---|
-| `index.js` | 每分钟扫一次：抢锁 → 扣额度 → 下发 → 记结果；末尾按 `fid` 去重推 `rev` |
+| `index.js` | 每轮：**先回填老数据**（`backfillPushAt`）→ 按 `pushAt` 扫 → 抢锁 → 扣额度 → 下发 → 记结果；末尾按 `fid` 去重推 `rev` |
 | `config.json` | `permissions.openapi:['subscribeMessage.send']` + `triggers:[{type:'timer',config:'0 * * * * * *'}]` |
 
 **四条官方事实（照抄，别凭记忆改）**：
@@ -79,8 +81,9 @@
 - 触发器**时区固定 UTC+8**，cron 七段式（秒 分 时 日 月 星期 年），最小粒度分钟。
 - **会重复触发 → 必须抢锁**：`where({_id, done:_.neq(true), pushed:_.neq(true)}).update({pushed:true})`，
   只有 `stats.updated === 1` 的那次才真发。去重的全部实现就是这一句，不需要锁表。
-- 扫描条件必须 `remindAt: _.and(_.gt(0), _.lte(t))`，**不能只写 `_.lte`** —— `remindAt` 为 `null`
-  的文档在 `$lte` 下也会被捞出来（null 在类型序里排在数字之前）。
+- 扫描条件必须 `pushAt: _.and(_.gt(0), _.lte(now))`，**不能只写 `_.lte`** —— `pushAt` 为 `null`
+  的文档（选了「不提醒」或压根没设提醒时间）在 `$lte` 下也会被捞出来（null 在类型序里排在数字之前），
+  白占分页窗口。⚠️ v8 起条件里的字段是 `pushAt` **不是 `remindAt`**（见下面 1.4.1）。
 - `pushed` 的排除必须写 **`_.neq(true)` 而不是等值 `false`** —— 升级上来的老文档压根没这个字段，
   等值条件挑不到它们 → 那批提醒**永远发不出去、而且一点报错都没有**。
 
@@ -108,6 +111,61 @@
 - **首次保存带提醒的事项时**客户端才请求授权（`wx.requestSubscribeMessage`），
   且**必须由用户真的点一次触发**才攒得到额度（「设了提醒」本身不产生额度）。
   单独放一个「补授权」按钮属于「无触发场景的订阅」，微信不认。
+  ⚠️ v8 起触发条件收紧为 `remindAt && leadMin !== -1`（选了「不提醒」就不弹订阅框），
+  且**拒绝时当场 toast**（理由见 1.4.1）。
+
+### 1.4.1 提前量的可配置化（v8，2026-10-13）
+
+**数据模型**：`fq_items` 多出 `leadMin` / `pushAt` 一对。`leadMin` = 提前多少分钟（白名单，
+`-1` = 不提醒）；`pushAt` = `remindAt - leadMin * 60000`（预算好的推送时刻）。
+`leadMin` 只在有 `remindAt` 时有值；`leadMin === -1` 或没提醒时间 → `pushAt` 落 `null`。
+
+- ⚠️ **落库 `pushAt` 不是优化，是唯一可行解**：逐条提前量**表达不成单一扫描窗口**
+  （A 提前 5 分钟、B 提前 7 天，该发时刻之间毫无关系）。看似可行的替代（窗口放宽到 30 天
+  + 内存里逐条过滤）会撞 `CAP = 500` 分页上限 → 排在后面的**静默漏推**。
+  落成 `pushAt` 后条件回到 `pushAt <= now`，语义与索引都干净，代价只是变化时重算一次。
+- ⚠️ **`-1` 而非 `0` 作「不提醒」哨兵**：`toLead()` 把白名单外的值一律回落默认档；
+  若 `0` 合法，一个脏值（老数据的 `null`、手滑传的字符串）就会把提醒**静默关掉** ——
+  用户以为开着、实际永远不发，这是最糟的失败方向。用 `-1` 后失败方向是「发得比预期早」。
+- **三份白名单**：`utils/const.js` 的 `LEAD_OPTIONS`、`fqTodo` / `fqRemind` 的 `LEAD_ALLOWED`
+  （10 档：`-1/5/10/30/60/180/1440/4320/10080/43200`）；`LEAD_DEFAULT = 30` 同样三处一致。
+  两个云函数各留一份 `toLead` / `toPushAt`（**逐字一致**），`test-remind.js` 读源码比对。
+- ⚠️ **`remindAt` / `leadMin` / `pushAt` 是一组**：`updateItem` 里任一进来就三个一起重算
+  （分开更新必然算出中间态）。**「提前量真的变了」也要复位 `pushed` / `pushedAt` / `pushOk` / `pushErr`**，
+  否则改完那条提醒永远不再排队（表现是「改了没用」，不报错）。只改标题**不**复位。
+- ⚠️ **`updateItem` 必须先把旧值读出来**：客户端每次保存都会把 `remindAt` / `leadMin` 一起带上
+  （哪怕没动过），不比对旧值就会每次都复位推送状态、白发一条。老数据没有 `leadMin`，
+  读旧值时要 `toLead(old.leadMin)` 按默认档补齐而不是落 `null`（落 `null` 会让「只改个标题」
+  因为「提前量从 30 变成 null」白白复位）。
+- **客户端**：抽屉里条件渲染的「提前提醒」行（`wx:if="{{form.hasRemind}}"`），
+  `form.leadIdx` / `form.leadLabel`，`LEAD_DEFAULT_IDX` 用 `findIndex` 算**不写死下标**；
+  `openForm` 的 `leadIndex(item ? item.leadMin : LEAD_DEFAULT)` **只读 `leadMin`、不看 `pushAt`**
+  （拿结果反推输入等于把同一件事算两遍）；`onClearRemind` 一并复位提前量；
+  小字授权说明是 `.subhint`（22rpx / `var(--ink3)`），配套 `.rowline .ico-chev-r` 那条通用规则。
+- ⚠️ **本地镜像也要写 `leadMin`**（编辑分支 `it.leadMin = payload.leadMin`、新建 push 的那条
+  带 `leadMin: payload.leadMin`）：抽屉重开读的就是它。漏了的表现是「刚选的提前量，重开一次
+  就变回默认档」—— **与「云端还是旧包」那个故障长得一模一样**，所以那条断言的价值不只是
+  守乐观更新，更是把两个成因分开。
+- **老数据回填 `backfillPushAt()`**：`exports.main` 第一步就跑（**先回填、再扫描**，反了升级那轮
+  整批漏掉）。单轮最多 5 页 × `PAGE = 100`。判据是 **`leadMin: _.exists(false)`**，
+  不是 `pushAt` 缺失（「不提醒」的 `pushAt` 是 `null`、字段在 → 无限回填）。
+  ⚠️ **这条判据的区分力测试守不住**（两种判据挑出同一批文档，差异只在容器对 `null` 字段是否算缺失），
+  别声称测试守住了它 —— 结论写在 `mutate-lead.js` 与 `test-remind.js` 第 [14] 组注释里。
+  副作用**有意**：存量事项提前量 10 → 30 分钟。
+- **假 SDK 补了 `_.exists`**（`fake-cloud.js` 的 `exists(v)` + `test(cond, val, has)` 的
+  `__exists` 分支 + `match` 传 `Object.prototype.hasOwnProperty.call`）。
+- **授权行为**：只在「有提醒时间且提前量 ≠ 不提醒」时 `askSubscribe()`；被拒（`reject`/`ban`/`filter`）
+  时**当场 toast「未授权，这条提醒不会推送到微信」**（只用 toast：不改数据、不弹 modal、不拦流程 ——
+  用户可能只是手滑）；环境不支持则静默跳过。提醒时间与提前量**照常保存**，
+  到点由 `fqRemind` 记 `no-quota`。
+- **测试位置**：`test-cloudfn.js` 第 [22] 组（白名单 / 脏值回落方向 / `pushAt` 预算 /
+  改它也复位 / 老数据补齐）；`test-remind.js` 第 [12] 组（三份白名单与默认值的跨文件比对 +
+  `pushAt` 扫描 / 排序 / 到期判据）、第 [13] 组（回填）、第 [14] 组（「不提醒」不回填不进候选）；
+  `test-reorder.js` 第 [23] 组（授权条件 / `leadMin` 只算在有提醒时间时 / 本地镜像）。
+- **变异验证**：`.workbuddy/tmp/mutate-lead.js`，**19/19 符合预期**（18 红 + 1 对照组绿）。
+  其中「回填判据 `leadMin` ↔ `pushAt`」那条变异**已被证伪并删除**（理由见上）。
+- **部署**：`FN_VER` 7 → 8；`fq_items` 的提醒索引从 `remindAt` **改建到 `pushAt`**；
+  ⚠️ **`fqRemind` 必须单独重新部署**（不在 action 清单里，握手管不到它，旧包**一条都不发**）。
 
 ## 二、首屏种子
 
@@ -122,8 +180,9 @@
 现有**两个**云函数：`fqTodo`（数据出口）与 `fqRemind`（提醒推送）；
 ⚠️ **`fqRemind` 还要额外右键点一次「上传触发器」** —— 只「上传并部署」不会带上 `config.json` 里的
 定时触发器，表现为「提醒永远不发、而且一点报错都没有」。
-新环境要先建 **5 个集合**（见 §一 1.2），权限都设「仅创建者可读写」
+新环境要先建 **6 个集合**（见 §一 1.2），权限都设「仅创建者可读写」
 （注意这条对云函数无效，真正的防线是 `MEMORY.md` §八 8.1 的 `fid` 铁律）。
+⚠️ 改提醒链路还要**改建 `fq_items` 的提醒索引**（v8 起是 `pushAt`，见 1.4.1）。
 
 **同一个坑有两种长相，别搞混：**
 
@@ -168,19 +227,19 @@ node .workbuddy/tools/check-all.js
 
 一串 **11 步**，末尾汇总「全部通过 / 有 N 项未通过」：
 
-| 工具 | 规模 | 覆盖 |
+| 工具 | 规模（2026-10-13 v8 实测） | 覆盖 |
 |---|---|---|
-| `arch-check.js` | 453 class / 307 选择器 | **重构等价性**：展平组件后比 class 序列（多重集 + 位置）+ 跨全部 wxss 的「选择器→声明体」映射 |
+| `arch-check.js` | **469** class / **314** 选择器 / 15 份 wxss | **重构等价性**：展平组件后比 class 序列（多重集 + 位置）+ 跨全部 wxss 的「选择器→声明体」映射 |
 | `event-check.js` | 组件 13 / 出口 15 / 页面 bind 18 | 事件接线五条：组件自带 / 页面自带 / **出口闭合** / **取值形状** / 同名同形 |
 | `component-audit.js` | 13 个宿主 | **组件解析**：标签注册 / 四个文件齐 / `component:true` / 文件名同名 / WXML 标签配平 |
-| `mp-check.js` | class 213 / WXSS 218、data 118 键 | class 契约（全局）、data 契约（按目录）、结构配对、**固定头部契约** |
-| `class-collision.js` | 页面级选择器 122 个 | 图标内部 class 与页面级 class 重名 |
-| `test-reorder.js` | **23 组 / 291 条** | 页面逻辑：拖动 / 左滑 / 排序模式 / 拖动竞态 / 起动闸与位移量化 / 视图层静态约定 / 自动滚 / 版本握手 / 同步避让 / 家庭视图 / 分类管理 / 提醒推送契约 / 一屏装满 + **悬浮按钮的落点** |
-| `test-cloudfn.js` | **20 组 / 215 条** | 云函数 fqTodo：reorder / 越权 / 家庭与邀请码 / 老数据认领 / rev 同步 / 分类删改与分权 / 订阅额度 / 推送状态 / 种子 / 握手 |
-| `test-remind.js` | **12 组 / 107 条** | 云函数 fqRemind：去重（含并发）/ 额度不足 / 窗口与迟到边界 / 五槽位 / 北京时间 / 跨用户跨家庭 / 触发器配置契约 |
-| `test-water.js` | **5 组 / 35 条** | 今日饮水：吸附 / 夹紧 / 事件时机 / 去重 / observer 夹紧 + 页面侧存储与跨天契约 |
+| `mp-check.js` | class 215 / WXSS 221、data 14 作用域 / 119 键 | class 契约（全局）、data 契约（按目录）、结构配对、**固定头部契约** |
+| `class-collision.js` | 页面级选择器 **79** 个 | 图标内部 class 与页面级 class 重名 |
+| `test-reorder.js` | **24 组 / 360 条** | 页面逻辑：拖动 / 左滑 / 排序模式 / 拖动竞态 / 起动闸与位移量化 / 视图层静态约定 / 自动滚 / 版本握手 / 同步避让 / 家庭视图 / 分类管理 / 提醒推送契约 / **提前量的本地镜像** / 一屏装满 + **悬浮按钮的落点** |
+| `test-cloudfn.js` | **22 组 / 277 条** | 云函数 fqTodo：reorder / 越权 / 家庭与邀请码 / 老数据认领 / rev 同步 / 分类删改与分权 / 订阅额度 / 推送状态 / 进度耦合 / **提前量白名单与 `pushAt` 预算** / 种子 / 握手 |
+| `test-remind.js` | **14 组 / 129 条** | 云函数 fqRemind：去重（含并发）/ 额度不足 / 窗口与迟到边界 / 五槽位 / 北京时间 / 跨用户跨家庭 / 触发器配置契约 / **按 `pushAt` 扫描 + 三份白名单比对** / **老数据回填** |
+| `test-water.js` | **5 组 / 36 条** | 今日饮水：吸附 / 夹紧 / 事件时机 / 去重 / observer 夹紧 + 页面侧存储与跨天契约 |
 | `test-sched.js` | **17 组 / 193 条** | 日程：42 格月历排布 / 跨月跨年闰年 / 本地时区（不走 UTC）/ 今天-明天标签 / 圆点与列表同口径 / 计划卡与保存 / adoptPlans 容错 / **页眉固定今天** / 接线契约 |
-| `fake-cloud.js` | — | 上面两份云函数测试**共用**的假 `wx-server-sdk`（内存库 + `db.command` + 云调用记录） |
+| `fake-cloud.js` | — | 上面两份云函数测试**共用**的假 `wx-server-sdk`（内存库 + `db.command` + **`_.exists`** + 云调用记录） |
 
 - **`mp-check` 的两处白名单别忘**：新视图（如 `sched`）是 `view` 的状态值，
   要同时加进 `ROOT_WHITELIST` 与 `CLASS_WHITELIST`，否则会报「WXML 用到但没有任何 WXSS 规则」。
@@ -200,12 +259,22 @@ node .workbuddy/tools/check-all.js
   `mk-component.js`（按清单机械搬段；**所有区间都是同一份原文上的坐标，必须收集齐再统一从后往前切**）。
 - `mp-check.js` 第 4 条断言 `dhead`/`filters`/`sortrow` **不在** `.scroller` 区间内。
 - 两份仿真测试都**加载真实源码 + 假环境**跑真实方法，不复制逻辑。
-- **`test-reorder.js` 桩的三个必踩坑**：
+- **`test-reorder.js` 桩的五个必踩坑**：
   ① **`select` 与 `selectAll` 返回结构不同**（单点 `res[0]` 是 rect，批量 `res[0]` 是 rect 数组）——
      写错会让页面一直走降级分支而测试仍绿。**降级路径要有正反两组断言。**
   ② 异步生效的东西要能「挂起 + 手动 flush」（`setTimeout` 桩成可 flush；`createSelectorQuery`
      要能选「回调迟到」，否则竞态类断言永远绿）。
   ③ 假滚动区要会**夹取** `scrollTop`（`SC` + `flushScroll()`），夹取才能体现「滚到底」。
+  ④ ⚠️ **结算点只有一个，在 [19] 的 promise 链尾**（`finish()` 带一次性闸门）。
+     ⇒ **写进 `.then` 里的断言根本轮不到执行** —— 那份 promise 排在 [19] 之后，
+     `finish()` 已经 `process.exit` 了。这种断言不报错、不失败、也**永远不会红**，
+     比没有断言更糟（它会让你以为守住了）。**要断言异步分支，就走 [18]/[19] 那种「在链尾
+     结算」的写法**；做不到就别写，改成静态断言并把原因写进注释。
+  ⑤ **变异验证里的「排序类」断言要用顺序相反的夹具**：`[9]` 组原来三条夹具的 `pushAt` 与
+     `remindAt` **同向递增**，于是把 `orderBy` 改回 `remindAt` 也得到相同顺序 —— 断言是摆设。
+     改成两字段顺序相反（A 的 `pushAt` 最早、`remindAt` 最晚）才守得住。
+     **同理**：夹具的默认值别贴着边界（`test-remind` 的 `pushAt` 默认取 `Date.now()`，
+     别由 `remindAt - 10min` 折算 —— 那会恰好落在 `LATE_MS` 边界上，偶发失败）。
 - **CommonJS 测试脚本不能有顶层 `await`**（`ERR_AMBIGUOUS_MODULE_SYNTAX`）；排空微任务用
   `new Promise(r => setImmediate(r))`，**别连写几个 `Promise.resolve().then`**。
 - `wx.showModal({editable:true})` 的返回值是 **promise**，手工调 `success()` 只是 resolve；
@@ -252,7 +321,7 @@ node .workbuddy/tools/check-all.js
 - **「收起」必须是真收起**：位移不到 45% 阈值就把 `swipeKey` 一并清空（`open ? id : ''`）。
 - **`onRowMove` 节流基准取这一行自己的位移**：`const prev = data.swipeKey===this._drag.id ? data.swipeX : 0`。
 
-## 七、UI 像素级诊断手法（从 `MEMORY.md` §十一 迁出）
+## 七、UI 像素级诊断手法（从 `MEMORY.md` §十三 迁出）
 
 量法：① 目标色包围盒（判等分）；② 逐行像素计数（找水平线/越界）；③ 裁切放大 4~8 倍肉眼看；
 ④「逐列主色 + ROI 逐行字符画」定位小图标偏心。先算 **1rpx = 截图宽 ÷ 750**。

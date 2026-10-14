@@ -934,65 +934,266 @@
   border-color: var(--q1);
 }
 
-/* 提醒时间行（日期 / 时间两个 picker） */
+/* ---------------- 提醒三参数（v9） ----------------
 
-.rowline {
+   一张卡装三个参数 + 卡下一行预览。它们不是三件独立的事，而是同一个提醒的
+   三个坐标（哪天几点 / 提前多久开口 / 说一次还是每天说），所以不拆成三个 field。
+
+   规格按设计稿 ×2 换算（画布 375px → 750rpx）：参数行 22rpx 上下 padding
+   + 27rpx 文字 ≈ 88rpx 触区高。 */
+
+.remcard {
+  border: 2rpx solid var(--line);
+  border-radius: 24rpx;
+  background: #fff;
+  overflow: hidden;
+}
+
+.remrow {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  border: 2rpx solid var(--line);
-  border-radius: 22rpx;
+  gap: 20rpx;
   padding: 22rpx 26rpx;
+  border-top: 2rpx solid var(--line2);
   font-size: 27rpx;
 }
 
-.rowline .pick {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* 第一行不该有上边框 —— 卡自己的边框就是它的上边界，多一条会看着像双线 */
+.remrow:first-child {
+  border-top: 0;
 }
 
-.rowline .pdate {
+/* ⚠️ 置灰用整行底色 + 灰字，不是 opacity：opacity 会把子元素一起稀释，
+   而里面那句「先设置提醒时间」正是要看清的东西 —— 它负责告诉用户下一步做什么。
+   置灰的两行在 handler 里直接 return（点了不响应）。 */
+.remrow.dis {
+  background: var(--line2);
+  color: var(--ink3);
+}
+
+.remrow.dis .rv {
+  color: var(--ink3);
+}
+
+.remrow .rk {
   flex: 1;
   min-width: 0;
 }
 
-.rowline .ptime {
-  flex: 0 0 auto;
-}
-
-.rowline .pick.right {
-  text-align: right;
-  color: var(--ink2);
+.remrow .rv {
   display: flex;
   align-items: center;
-  /* justify-content: flex-end; */
-  width: 120rpx;
+  gap: 12rpx;
+  font-size: 25rpx;
+  color: var(--ink2);
+  white-space: nowrap;
 }
 
-.rowline .pick.right .ico-chev-r {
+/* 同一个位置上并排着「日期」与「时间」两个 picker —— 两个都要能点，
+   所以不能把整行合成一个 picker（那样只能调起日期选择器）。
+
+   ⚠️ 两个都给最小宽度并**右对齐**。参考稿里它们是「铺满整行」的透明控件，
+   塞进一行之后会退化成「文字多宽就多宽」：`09:00` 才 63rpx（31px）宽，
+   远低于触区下限，用户点两次有一次会落到行上什么都不发生。
+   右对齐让它们紧挨着，读起来仍像一个整体（明天 09:00），
+   多出来的空白落在值的前面 —— 那正好是「标签 …… 值」本来的样子。 */
+.remrow .pkd,
+.remrow .pkt {
+  display: block;
+  text-align: right;
+  padding: 8rpx 0;   /* 触区高度补到整行 */
+}
+
+.remrow .pkd {
+  min-width: 130rpx;
+}
+
+.remrow .pkt {
+  min-width: 110rpx;
+}
+
+/* 时分用等宽数字：选完 09:05 → 09:10 这类变化不会让整行左右抽动 */
+.remrow .pkt .tm {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 「默认」徽标。它同时是「从没设过」的兜底值，用户看到它才知道自己没动过。 */
+.remrow .def {
+  font-size: 20rpx;
+  font-weight: 600;
+  color: var(--ink3);
+  background: var(--line2);
+  padding: 2rpx 10rpx;
+  border-radius: 8rpx;
+  letter-spacing: 0.02em;
+}
+
+.remrow .ico-chev-r,
+.remrow .ico-chev-dn {
   margin-left: 14rpx;
   flex: 0 0 14rpx;
 }
 
-/* v8：「提前提醒」那一行整行是 picker，箭头不在 .pick 内部，上面那条挑不到它。
-   提取成通用规则而不是再加一条 .pick 变体 —— 箭头只要落在 .rowline 里就该钉死宽度，
-   这本来就与它左边装什么无关。 */
-.rowline .ico-chev-r {
-  margin-left: 14rpx;
-  flex: 0 0 14rpx;
+.remrow .clr {
+  flex: 0 0 auto;
+  color: var(--q1);
+  font-size: 24rpx;
 }
 
-.rowline .ph {
+/* ---------------- 十档提前量（行内展开） ----------------
+   选项多、标签长，平铺会把抽屉撑到必须滚动；但也不能塞进 picker ——
+   用户得先看见有哪些档位，才知道自己想选哪一档。 */
+
+.optrow {
+  display: flex;
+  align-items: center;
+  gap: 20rpx;
+  padding: 24rpx 26rpx;
+  border-top: 2rpx solid var(--line2);
+  font-size: 27rpx;
+}
+
+.optrow .ov {
+  flex: 1;
+  min-width: 0;
+}
+
+.optrow .ol {
+  display: block;
+}
+
+/* ⚠️ hint 必须 display:block。<text> 默认 inline，inline 元素上的 margin-top
+   不生效，两行会挤成一行。 */
+.optrow .oh {
+  display: block;
+  margin-top: 2rpx;
+  font-size: 23rpx;
+  color: var(--ink3);
+}
+
+.optrow.on .ol {
+  font-weight: 600;
+}
+
+/* 选中标记用 ✓ 而不是换底色：底色在白底上要额外算对比度，而勾选符号
+   与正文同源，任何档位都读得出来。
+   opacity 而不是 display —— 它得占着位置，否则展开列表会在选中的那一项上
+   突然缩进一格。 */
+.optrow .ck2 {
+  flex: 0 0 36rpx;
+  width: 36rpx;
+  height: 36rpx;
+  border-radius: 50%;
+  background: var(--ink);
+  color: #fff;
+  font-size: 20rpx;
+  font-weight: 700;
+  line-height: 36rpx;
+  text-align: center;
+  opacity: 0;
+}
+
+.optrow.on .ck2 {
+  opacity: 1;
+}
+
+/* ---------------- 重复：两档分段控件 ----------------
+   只有两项且互斥 → 比 picker 少一次点击，而且当前状态一直可见
+   （picker 收起后只剩一行文字，用户得点开才能想起来自己选的哪个）。 */
+
+.seg {
+  display: flex;
+  gap: 6rpx;
+  padding: 6rpx;
+  background: var(--line2);
+  border-radius: 18rpx;
+}
+
+.seg .sg {
+  padding: 10rpx 22rpx;
+  border-radius: 14rpx;
+  font-size: 24rpx;
+  color: var(--ink2);
+  white-space: nowrap;
+}
+
+.seg .sg.on {
+  background: #fff;
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* ⚠️ 置灰行的底色本身就是 --line2，轨道同色的话整个控件会**整块消失** ——
+   只剩两个字飘在灰底上。所以置灰时把轨道反过来用白。 */
+.seg.dis {
+  background: #fff;
+}
+
+.seg.dis .sg {
   color: #b6bdc7;
 }
 
-.rowline .clear {
-  color: var(--q1);
-  font-size: 24rpx;
-  padding-left: 24rpx;
-  flex: 0 0 auto;
+.seg.dis .sg.on {
+  color: var(--ink3);
+}
+
+/* ---------------- 卡下的预览行 ----------------
+   它是**防选错的最后一道防线**：提前量把 09:00 挪到 08:30，这个位移用户看不见 ——
+   不算出来摆在他眼前，选错档位要等到提醒来了（或压根没来）才会发现。 */
+
+.remprev {
+  display: flex;
+  align-items: flex-start;
+  gap: 14rpx;
+  margin-top: 16rpx;
+  padding: 16rpx 22rpx;
+  background: var(--line2);
+  border-radius: 18rpx;
+  font-size: 23rpx;
+  line-height: 1.5;
+  color: var(--ink2);
+}
+
+/* 关断态（未设时间 / 选了「不提醒」）降一级字色 ——
+   它说的是「不会有通知」，用正常态的视觉重量会让人以为提醒是好的。 */
+.remprev.off {
+  color: var(--ink3);
+}
+
+.remprev .pt {
+  flex: 1;
+  min-width: 0;
+}
+
+.remprev .ico {
+  margin-top: 4rpx;   /* 与首行文字的视觉中线对齐 */
+}
+
+/* 三枚 26rpx 图标。用内联 SVG data URI 而不是 currentColor 自绘：
+   折线式（铃铛、循环箭头）用 border/伪元素画不出来。
+   ⚠️ 颜色必须烧进 URI（16 进制要写成 %23）—— 它不吃 currentColor。
+   好在预览行两种状态用的都是 --ink3，一份颜色就够，不必备两套。 */
+.ico-bell,
+.ico-bell-off,
+.ico-rep {
+  flex: 0 0 26rpx;
+  width: 26rpx;
+  height: 26rpx;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: contain;
+}
+
+.ico-bell {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%2398a0ac' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M10 2.6a4.8 4.8 0 0 0-4.8 4.8v3.1L3.7 13.3h12.6l-1.5-2.8V7.4A4.8 4.8 0 0 0 10 2.6z'/%3E%3Cpath d='M8.2 15.8a1.9 1.9 0 0 0 3.6 0'/%3E%3C/svg%3E");
+}
+
+.ico-bell-off {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%2398a0ac' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M10 2.6a4.8 4.8 0 0 0-4.8 4.8v3.1L3.7 13.3h12.6l-1.5-2.8V7.4A4.8 4.8 0 0 0 10 2.6z'/%3E%3Cpath d='M8.2 15.8a1.9 1.9 0 0 0 3.6 0'/%3E%3Cpath d='M3 3l14 14'/%3E%3C/svg%3E");
+}
+
+.ico-rep {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%2398a0ac' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M16.4 11.6A6.6 6.6 0 0 1 8.4 3.6a6.6 6.6 0 1 0 8 8z'/%3E%3Cpath d='M15.4 2.6v3.2M13.8 4.2h3.2'/%3E%3C/svg%3E");
 }
 
 /* ---------------- 我的 ---------------- */

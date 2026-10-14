@@ -25,6 +25,9 @@ const {
   SYNC_MS,
   LEAD_OPTIONS,
   LEAD_DEFAULT,
+  LEAD_DAILY_MAX,
+  REPEAT_OPTIONS,
+  REPEAT_DEFAULT,
   WATER_GOAL,
   WATER_KEY,
   PLAN_MAX,
@@ -68,12 +71,190 @@ function leadIndex(v) {
   });
   return i >= 0 ? i : LEAD_DEFAULT_IDX;
 }
+
+/* ---------------- 提醒周期（v9）：两个顶层换算 ----------------
+
+   周期同样存**下标**而不是值（与提前量同一个理由：分段控件按下标渲染，
+   真正要落库的 0/1 在 onSave 里由下标取一次，省掉「存进去再换算回来」这条路）。 */
+
+const REPEAT_LABELS = REPEAT_OPTIONS.map(function (o) {
+  return o.label;
+});
+
+// 「只提醒一次」那一档的下标。用 findIndex 而不是写死 0：枚举顺序是**展示顺序**，
+// 不是契约 —— 将来把「每天」排到前面，写死的 0 会静默指向另一档。
+const REPEAT_DEFAULT_IDX = Math.max(
+  0,
+  REPEAT_OPTIONS.findIndex(function (o) {
+    return o.v === REPEAT_DEFAULT;
+  })
+);
+
+// 「每天提醒」那一档的下标。**也不写死 1**，用「不是默认档的那一个」来定 ——
+// 这样枚举的取值、顺序怎么变都不会指错。只有两档，这个判据是完备的。
+const REPEAT_DAILY_IDX = Math.max(
+  0,
+  REPEAT_OPTIONS.findIndex(function (o) {
+    return o.v !== REPEAT_DEFAULT;
+  })
+);
+
+// 值 → 下标。老数据没有 repeat 字段（undefined）→ 回落「只提醒一次」，
+// 这正是「v9 之前的存量事项升级上来仍旧只响一次」的语义 ——
+// 所以这一版不需要像 v8 的 pushAt 那样再写一个回填函数。
+function repeatIndex(v) {
+  const n = Number(v);
+  const i = REPEAT_OPTIONS.findIndex(function (o) {
+    return o.v === n;
+  });
+  return i >= 0 ? i : REPEAT_DEFAULT_IDX;
+}
+
+// 提前量下标 → 分钟值。落库、预览行、找当前档位都从这一处走。
+function leadMinByIdx(idx) {
+  const o = LEAD_OPTIONS[idx] || LEAD_OPTIONS[LEAD_DEFAULT_IDX];
+  return o.v;
+}
+
+// 周期下标 → 落库用的值（0 / 1）。与 leadMinByIdx 同一个理由：
+// 落库值只留一个出口，别让 onSave 自己去找枚举。
+function repeatValueOf(idx) {
+  const o = REPEAT_OPTIONS[idx] || REPEAT_OPTIONS[REPEAT_DEFAULT_IDX];
+  return o.v;
+}
+
+// 「每天提醒」下把提前量夹到上限。与云函数 fqTodo 的 toLead 是**同一套语义**：
+// 夹到最接近的合法档（结果是发得晚），而不是回落默认档（跳到 30 分钟，
+// 离用户刚表达的「想提前得多一点」更远）。
+//
+// ⚠️ -1（不提醒）必须原样留下来。它是哨兵，不是「一个很小的数」——
+// 这里侥幸没踩到（-1 分给了 n < 0 那一支），但一旦有人为了「对称」把两步
+// 调换顺序（先 clamp 再判白名单），用户明说的「不要通知」就会被改成一条通知 ——
+// 那正是「不提醒」用 -1 而不是 0 要防的那个失败方向。
+function clampDailyLead(v) {
+  const n = Number(v);
+  if (!isFinite(n) || n < 0) return n;
+  return n > LEAD_DAILY_MAX ? LEAD_DAILY_MAX : n;
+}
+
+// 某份表单当前该选中哪一档提前量。打开抽屉、以及切换周期都走它。
+// ⚠️ 每天模式必须在这里夹一次：库里的值可能超上限（云端会夹，但手工改过的、
+// 或者将来放宽上限之前留下的都可能长这样），不夹就会出现「可选列表里没有
+// 『提前 30 天』这一项了，而右侧文案还写着它」这种自相矛盾的状态。
+function leadIdxFor(leadMinVal, repeatIdx) {
+  const v = repeatIdx === REPEAT_DAILY_IDX ? clampDailyLead(leadMinVal) : leadMinVal;
+  return leadIndex(v);
+}
+
+// 当前周期下**可选**的提前量档位。
+//
+// ⚠️「每天提醒」模式下藏掉超 1 天的四档：「每天提醒 + 提前 30 天」字面读出来
+// 就是「提前 30 天起、每天推一条」，等于连推 30 条同一件事，还会把攒了很久的
+// 额度一次烧光。会用到「每天提醒」的场景（吃药、锻炼、喂水、喂猫）本来就不需要
+// 提前几天。客户端藏只是**体验**（别让用户选出来），云端 toLead 还会再夹一次
+// （选出来了也不许生效）—— 前端能绕过，后端不能信任，两边各管一段。
+function leadOptsFor(repeatIdx) {
+  const daily = repeatIdx === REPEAT_DAILY_IDX;
+  return LEAD_OPTIONS.filter(function (o) {
+    return !daily || o.v <= LEAD_DAILY_MAX;
+  }).map(function (o) {
+    return {
+      v: o.v,
+      label: o.label,
+      // 只有「不提醒」这一档需要额外说明，而且它必须说：用户会以为时间被删了。
+      hint: o.v === -1 ? '保留提醒时间，只是不发通知' : '',
+      on: false,   // 由 remindVM 按当前档位填
+    };
+  });
+}
+
+// 'YYYY-MM-DD' → '今天 / 明天 / 后天 / 10月14日'。
+// 预览行里不能出现 dayWord 的兜底值「这一天」—— 那是在说一个还没被给定的日子，
+// 摆在预览行里等于没说。
+function dayWordAbs(dateStr) {
+  const diff = dayDiff(dateStr);
+  if (diff === 0 || diff === 1 || diff === 2) return dayWord(diff);
+  const p = String(dateStr).split('-');
+  return Number(p[1]) + '月' + Number(p[2]) + '日';
+}
+
+/* 预览行的三句话。**纯函数** —— 所以 test-reorder 能直接喂参数验它，
+   不必绕着 setData 走一圈（绕过去的话 WXML 桩里那些断言根本轮不到执行）。
+
+   为什么值得三句话：提前量的全部价值就是「把触发点挪到几点」。09:00 被提前量
+   挪到 08:30 是个用户看不见的位移 —— 不算出来摆在他眼前，选错档位要等到提醒
+   来了（或压根没来）才会发现。措辞不能复用：
+
+     未设时间   → 引导语（降级样式）：告诉他下一步做什么
+     选了不提醒 → 必须明说「时间还留着」，否则用户会以为提醒被清掉了
+     每天提醒   → 「每天 X 提醒，从某天起」：重点是「每天」和「从哪天开始」
+     只提醒一次 → 「将于 X 提醒」 */
+function remindPrev(hasRemind, date, time, leadMin, repeatIdx) {
+  if (!hasRemind) {
+    return { text: '先设置提醒时间，再选提前多久', off: true, icon: 'ico-bell-off' };
+  }
+  if (Number(leadMin) < 0) {
+    return { text: '提醒时间已保留，不会发送通知', off: true, icon: 'ico-bell-off' };
+  }
+  // 实际触发时刻 = 提醒时间 − 提前量。这个减法是整条改造里唯一用户看不见的一步。
+  const at = toTimestamp(date, time);
+  // 日期畸形时宁可退回引导语，也不要算出一个「NaN月undefined日」摆给用户看
+  if (!isFinite(at)) {
+    return { text: '先设置提醒时间，再选提前多久', off: true, icon: 'ico-bell-off' };
+  }
+  const push = at - Number(leadMin) * 60000;
+  const day = dayKey(push);
+  const hm = hhmm(push);
+  if (repeatIdx === REPEAT_DAILY_IDX) {
+    return {
+      text: '将于 每天 ' + hm + ' 提醒，从' + dayWordAbs(day) + '起',
+      off: false,
+      icon: 'ico-rep',
+    };
+  }
+  return { text: '将于 ' + dayWordAbs(day) + ' ' + hm + ' 提醒', off: false, icon: 'ico-bell' };
+}
+
+/* 提醒那一组字段的**派生值**，一处算出，返回要并回 form 的那些键。
+
+   散在 onDate / onTime / onLead / onRepeat / onClearRemind 五个 handler 里
+   各算一遍，早晚漏一个 —— 而漏掉的表现是「改了档位预览行不动」：
+   不报错，只是安静地说错话。所以只留 remindVM 一个出口。 */
+function remindVM(f) {
+  const cur = leadMinByIdx(f.leadIdx);
+  const daily = f.repeatIdx === REPEAT_DAILY_IDX;
+  const prev = remindPrev(f.hasRemind, f.date, f.time, f.hasRemind ? cur : null, f.repeatIdx);
+  return {
+    dateLabel: f.hasRemind ? dayWordAbs(f.date) : '不提醒',
+    leadLabel: leadLabel(cur),
+    // 「默认」徽标只挂在 30 分钟那一档：它同时是「从没设过」的兜底值。
+    leadDef: cur === LEAD_DEFAULT,
+    // 列表的选中项跟着当前档位走。⚠️ 每天模式下可能发生「当前档位不在列表里」
+    // （库里存着超上限的值），那一项就不标 —— 打开抽屉时 leadIdxFor 已经夹过，
+    // 所以这里只是兜底，不会真的出现「一个都没选中」。
+    leadOpts: leadOptsFor(f.repeatIdx).map(function (o) {
+      return {
+        v: o.v,
+        label: o.label,
+        hint: o.hint,
+        on: f.hasRemind && o.v === cur,
+      };
+    }),
+    repeatLabel: REPEAT_LABELS[f.repeatIdx] || REPEAT_LABELS[REPEAT_DEFAULT_IDX],
+    repeatDaily: daily,
+    repeatOpts: REPEAT_OPTIONS.map(function (o, i) {
+      return { idx: i, label: o.label, on: i === f.repeatIdx };
+    }),
+    remPrev: prev.text,
+    remPrevOff: prev.off,
+    remIcon: prev.icon,
+  };
+}
 const {
   pad2,
   todayStr,
   todayMeta,
   remindText,
-  remindDayShort,
   toTimestamp,
   normCode,
   inviteLabel,
@@ -238,16 +419,28 @@ const pageDef = {
       time: '09:00',
       hasRemind: false,
       dateLabel: '不提醒',
-      // 提前提醒时长（v8）。只在 hasRemind 为真时才出现在界面上 ——
-      // 没有提醒时间就谈不上「提前多久」。这里先落默认档占位，
-      // 真正的回填在 openForm 里按每条事项自己的 leadMin 做。
+      // 提前提醒时长（v8）与提醒周期（v9）都存**下标**。
+      // 界面上：提前量是一个行内展开的十档列表，周期是一个两档分段控件 ——
+      // 两者都按下标渲染，落库用的分钟值 / 0-1 值在 onSave 里由下标取一次。
       leadIdx: LEAD_DEFAULT_IDX,
       leadLabel: LEAD_LABELS[LEAD_DEFAULT_IDX],
+      // 没设提醒时间时这两行是置灰的（不是隐藏）—— 隐藏会让用户以为
+      // 「这个能力不存在」，置灰至少让他知道「有这回事，但要先填时间」。
+      repeatIdx: REPEAT_DEFAULT_IDX,
+      repeatLabel: REPEAT_LABELS[REPEAT_DEFAULT_IDX],
+      repeatDaily: false,
+      // 十档提前量列表的展开态。默认收起 —— 抽屉本来就长，一进来就摊开
+      // 十个选项会把「重复」那一行挤出视野。
+      remOpen: false,
+      leadOpts: [],
+      repeatOpts: [],
+      leadDef: true,
+      // 卡下的预览行（文案 / 是否降级 / 用哪枚图标），全部由 remindVM 算。
+      remPrev: '',
+      remPrevOff: true,
+      remIcon: 'ico-bell-off',
     },
     saveLabel: '保存',
-    // 「提前提醒」picker 的 range 吃一个字符串数组，而模板里做不了 map，
-    // 所以在 data 里摊平一次。它整场不变，setData 也就只在初始化时带上一次。
-    leadLabels: LEAD_LABELS,
   },
 
   /* ================= 生命周期 ================= */
@@ -514,6 +707,18 @@ const pageDef = {
       showCancel: false,
       confirmText: '知道了',
     });
+  },
+
+  /* 「补充提醒额度」（v9）。复用 askSubscribe，不另开一条调用链 ——
+     wx.requestSubscribeMessage 全文件仍然只有一处，授权被拒的那条 toast
+     也就只有一份，不会两条路各说各话。
+
+     为什么需要一个显式入口：「每天提醒」每天都要烧一条额度，而微信的一次性订阅
+     点一次「允许」只攒一条 —— 第二天就用光了。攒额度只能由**用户点击**触发
+     （requestSubscribeMessage 要求调用发生在用户交互之后），所以做不到
+     「快用完时自动续」，只能把它做成「我的」页里一个点得着的按钮。 */
+  onTopUpQuota() {
+    this.askSubscribe();
   },
 
   // 从分享卡片进来（path 里挂 ?code=XXXXXX）：首屏加载完自动尝试加入，
@@ -1723,6 +1928,14 @@ const pageDef = {
     const ts = item && item.remindAt ? item.remindAt : null;
     const d = ts ? new Date(ts) : null;
 
+    // 提醒周期：老数据（v9 之前）没有 repeat → 回落「只提醒一次」，
+    // 这就是「存量事项升级上来仍旧只响一次」落在客户端这一侧的位置。
+    //
+    // ⚠️ 提前量的下标要先知道周期才能算 —— 「每天提醒」下超 1 天的档位是**不能选**的，
+    // 库里却可能存着这种组合（手工改的、放宽上限之前留下的）。所以先读周期，
+    // 再让 leadIdxFor 顺手夹一次。顺序反了会打开成「列表里没有这一档，
+    // 右侧却写着它」的自相矛盾状态，而这状态不报错。
+    const repeatIdx = repeatIndex(item ? item.repeat : REPEAT_DEFAULT);
     const form = {
       id: item ? item._id : '',
       title: item ? item.title : '',
@@ -1735,15 +1948,14 @@ const pageDef = {
         : todayStr(),
       time: d ? pad2(d.getHours()) + ':' + pad2(d.getMinutes()) : '09:00',
       hasRemind: !!d,
-      dateLabel: '不提醒',
-      // 老数据（v8 之前）没有 leadMin → leadIndex 回落默认档，这就是
-      // 「默认提前 30 分钟」对存量事项生效的位置。
-      // ⚠️ 只读 item.leadMin，**不看** item.pushAt：pushAt 是从它推出来的，
-      // 拿结果反推输入等于把同一件事算两遍，迟早对不上。
-      leadIdx: leadIndex(item ? item.leadMin : LEAD_DEFAULT),
-      leadLabel: leadLabel(item ? item.leadMin : LEAD_DEFAULT),
+      // 下面这一整组（dateLabel / leadLabel / leadDef / leadOpts / repeatLabel /
+      // repeatDaily / repeatOpts / remPrev / remPrevOff / remIcon）都是派生值，
+      // 由 remindVM 一处算出后并进来。这里只写「输入」，不写「算出来的东西」。
+      leadIdx: leadIdxFor(item ? item.leadMin : LEAD_DEFAULT, repeatIdx),
+      repeatIdx: repeatIdx,
+      remOpen: false,
     };
-    if (d) form.dateLabel = remindDayShort(form.date, form.time);
+    Object.assign(form, remindVM(form));
 
     const isEdit = !!item;
     this.setData({
@@ -1790,48 +2002,75 @@ const pageDef = {
     this.setData({ 'form.catId': id, catPills: this.buildCatPillsForSheet(id) });
   },
 
+  /* ---------------- 提醒三参数（v9） ----------------
+
+     改这四个字段的**唯一入口**：合并补丁 → remindVM 重算派生值 → 一次 setData
+     写回整个 form。
+
+     为什么写回整个 form，而不是打散成 'form.date' / 'form.dateLabel' 这些路径：
+     setData 同时收到 `form`（整个对象）和 `form.xxx`（子路径）时谁生效是不确定的
+     —— 那是个只在某些基础库版本上才复现的坑。一个 key 进去，没有这个问题；
+     抽屉里就十来个字段，一次全写也不值得心疼。 */
+  applyRemind(patch) {
+    const f = Object.assign({}, this.data.form, patch || {});
+    Object.assign(f, remindVM(f));
+    this.setData({ form: f });
+  },
+
   onDate(e) {
-    const date = e.detail.value;
-    const f = this.data.form;
-    this.setData({
-      'form.date': date,
-      'form.hasRemind': true,
-      'form.dateLabel': remindDayShort(date, f.time),
-    });
+    // 只选日期也算「设了提醒时间」：用户点进日期选择器就是为了设它，
+    // 再要求他多点一次时间才生效，等于白送一个「怎么没反应」的时刻。
+    this.applyRemind({ date: e.detail.value, hasRemind: true });
   },
 
   onTime(e) {
-    const time = e.detail.value;
-    const f = this.data.form;
-    this.setData({
-      'form.time': time,
-      'form.hasRemind': true,
-      'form.dateLabel': remindDayShort(f.date, time),
-    });
+    this.applyRemind({ time: e.detail.value, hasRemind: true });
   },
 
-  // 提前提醒时长（v8）。picker 给的本来就是下标，直接存下标 ——
-  // 分钟值只在 onSave 里由下标取一次，省掉「存进去再换算回来」这条容易对不上的路。
-  // 越界（理论上来不了，但 picker 的 value 是数字）回落默认档，不写 undefined 进 data。
+  // 展开 / 收起十档列表。置灰行（还没设提醒时间）点了直接返回 ——
+  // 样式上它已经是灰的，再让它能展开就更说不通了。
+  onToggleLead() {
+    if (!this.data.form.hasRemind) return;
+    this.applyRemind({ remOpen: !this.data.form.remOpen });
+  },
+
+  // 选一档提前量。值走 dataset 而不是 picker 的下标 —— 列表是行内展开的，
+  // 没有 picker 那层「value 是下标」的约定。选完顺手收起列表：
+  // 用户的注意力本来就该回到预览行上，那才是他确认「选对了没」的地方。
+  //
+  // 置灰行照旧直接返回。列表在没设提醒时间时根本不渲染，所以这条路走不到 ——
+  // 但三道 guard 写成同一个形状，比「其中两道有、一道靠渲染挡住」可靠：
+  // 后者一旦有人把 `wx:if` 放宽，就会**静默**多出一个「灰着却能改」的入口。
   onLead(e) {
-    const i = Number(e.detail.value);
-    const idx = Number.isFinite(i) && LEAD_OPTIONS[i] ? i : LEAD_DEFAULT_IDX;
-    this.setData({
-      'form.leadIdx': idx,
-      'form.leadLabel': LEAD_OPTIONS[idx].label,
-    });
+    if (!this.data.form.hasRemind) return;
+    const v = Number(e.currentTarget.dataset.v);
+    this.applyRemind({ leadIdx: leadIndex(v), remOpen: false });
   },
 
+  /* 切换提醒周期。
+
+     ⚠️ 切到「每天」时要把超上限的提前量夹回 3 小时那一档，方向与云函数
+     toLead 完全一致（发得晚，而不是不发、也不是连发 30 条）。不夹的话界面上
+     会出现「可选列表里已经没有了『提前 30 天』，而右侧文案还写着它」这种
+     自相矛盾的状态 —— 不报错，只是让用户怀疑自己看错了。 */
+  onRepeat(e) {
+    if (!this.data.form.hasRemind) return;
+    const i = Number(e.currentTarget.dataset.k);
+    const idx = Number.isFinite(i) && REPEAT_OPTIONS[i] ? i : REPEAT_DEFAULT_IDX;
+    const cur = leadMinByIdx(this.data.form.leadIdx);
+    const patch = { repeatIdx: idx };
+    if (idx === REPEAT_DAILY_IDX && cur > LEAD_DAILY_MAX) {
+      patch.leadIdx = leadIndex(clampDailyLead(cur));
+    }
+    this.applyRemind(patch);
+  },
+
+  /* 清除提醒时间。
+
+     ⚠️ 周期**不清**（与云函数一致）：清掉的是「什么时候提醒」，不是
+     「要不要每天」—— 用户下次再设时间时不必重选一遍。提前量同理保留。 */
   onClearRemind() {
-    // 一并把提前量复位成默认档：清除提醒时间后，云函数会把 remindAt / leadMin /
-    // pushAt 一起落成 null，抽屉里整块选择器也随之消失。
-    // 留个残值在 form 里没意义，下次打开又是另一个事项的数据。
-    this.setData({
-      'form.hasRemind': false,
-      'form.dateLabel': '不提醒',
-      'form.leadIdx': LEAD_DEFAULT_IDX,
-      'form.leadLabel': LEAD_LABELS[LEAD_DEFAULT_IDX],
-    });
+    this.applyRemind({ hasRemind: false, remOpen: false });
   },
 
   onSave() {
@@ -1856,6 +2095,12 @@ const pageDef = {
       remindAt: remindAt,
       leadMin: leadMin,
     };
+
+    // ⚠️ 没设提醒时间时**根本不送 repeat**（而不是送 0）。
+    // 云函数在 `src.repeat === undefined` 时沿用旧值，于是「清除提醒时间」不会
+    // 顺手把用户选的「每天」也抹掉 —— 用户并没有改过周期。送了 0 的话，
+    // 他再设一次时间就会发现周期变回了「只提醒一次」，而那是个无迹可寻的「我明明没动它」。
+    if (remindAt) payload.repeat = repeatValueOf(f.repeatIdx);
 
     const that = this;
     const isEdit = !!f.id;
@@ -1888,6 +2133,11 @@ const pageDef = {
           // 变回 30 分钟」—— 而那正是 v8 握手专门要拦的那个故障现象，
           // 区别只在于这次是客户端自己把镜像写漏了。
           it.leadMin = payload.leadMin;
+          // ⚠️ v9：周期也要跟着 payload 走，**没送就别动镜像**。
+          // 无脑写 `it.repeat = 0` 的话，一条「每天提醒」的事项在用户清了提醒时间之后，
+          // 库里还是 1、镜像变成 0 —— 分岔了，而重开抽屉读的是镜像。
+          // 那种错不会报任何错，只会让用户看到「刚才明明选了每天，怎么变成一次了」。
+          if (payload.repeat !== undefined) it.repeat = payload.repeat;
         },
         callCloud('updateItem', { id: f.id, patch: payload })
       );
@@ -1905,6 +2155,9 @@ const pageDef = {
             remindAt: payload.remindAt,
             // 与上面编辑分支同理：镜像里得有 leadMin，否则「刚建好就去改」会看到默认档
             leadMin: payload.leadMin,
+            // 周期同理。新建时没设提醒时间的话 payload 里没有 repeat，
+            // 落库会是云函数的默认 0 —— 镜像跟着落默认值，两边才不会分岔。
+            repeat: payload.repeat === undefined ? REPEAT_DEFAULT : payload.repeat,
             // 新事项排在末尾（排序值最大），与云函数 addItem 的写法一致
             order: Date.now(),
           });

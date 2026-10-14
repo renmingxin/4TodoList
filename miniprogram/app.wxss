@@ -234,7 +234,8 @@ button::after { border: none; }
 }
 
 .ico-chev-l,
-.ico-chev-r {
+.ico-chev-r,
+.ico-chev-dn {
   width: 14rpx;
   height: 14rpx;
   border-top: 3rpx solid currentColor;
@@ -243,6 +244,11 @@ button::after { border: none; }
 
 .ico-chev-l { transform: rotate(-135deg); }
 .ico-chev-r { transform: rotate(45deg); }
+
+/* 朝下的那份（v9：提醒卡的「提前提醒」展开态）。
+   同一个 `⌐` 转 135° 就是 v —— 与 -135°/45° 那两个是同一枚图标的三种朝向，
+   所以并进上面那条基础规则，只在这里给角度。 */
+.ico-chev-dn { transform: rotate(135deg); }
 
 .ico-check {
   width: 12rpx;

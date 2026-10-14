@@ -1335,8 +1335,11 @@ console.log('\n[23] 提醒推送视图层防回归（v5）');
   eq('模板 id 由 adoptSub 从 bootstrap 存下来', /if \(s\.templateId\) this\.subTpl = s\.templateId;/.test(js), true);
 
   // ---- 攒额度：一个入口、一个条件、一种结果才算数 ----
+  // ⚠️ v9 起「我的」页多了一个「补充提醒额度」的入口，但它**复用** askSubscribe
+  // 而不是另开一条调用链 —— 所以这条断言依然成立，而且正是它守住了
+  // 「两条路不会各说各话」（拒绝时那条 toast 只有一份）。
   const subs = js.match(/wx\.requestSubscribeMessage\(\{/g) || [];
-  eq('弹授权的地方全文件只有一处（没有旁路补额度的入口）', subs.length, 1);
+  eq('调用订阅接口的地方全文件只有一处（补额度入口复用它，不是旁路）', subs.length, 1);
   // v8：条件多了「且提前量不是『不提醒』」—— 用户已经明说不要通知，就不该再弹订阅框。
   eq('只在保存带提醒的事项时请求', /if \(remindAt && leadMin !== -1\) this\.askSubscribe\(\);/.test(js), true);
   eq('提前量只在真有提醒时间时才算', /const leadMin = remindAt\s*\?\s*\(LEAD_OPTIONS\[f\.leadIdx\]/.test(js), true);
@@ -1378,57 +1381,255 @@ console.log('\n[23] 提醒推送视图层防回归（v5）');
   eq('服务端没给 sub 时不炸', m.data.subQuota, 0);
   eq('也不清掉已有的模板 id', m.subTpl, 'TPL-X');
 
-  /* ---- v8：提前量的本地镜像 ----
-     抽屉重开时读的是 `item.leadMin`，而落库是异步的。镜像漏写不会报任何错，
-     表现是「刚选的提前量，重开一次就变回默认档」—— 与「云端还是旧包」那个
-     故障长得一模一样。所以这条断言的价值不只是「守住乐观更新」，更是**把两个
-     成因分开**：这里红了，就不是云函数没部署。 */
+  /* ---- v9：提醒三参数（提醒时间 / 提前提醒 / 重复）的派生值与本地镜像 ----
+
+     两个故障长得一模一样，这组断言要把它们分开：
+       ① 云函数没重新部署（旧包不认识 repeat）；
+       ② 客户端自己的**本地镜像**漏写了 —— 抽屉重开时读的是 `item.leadMin`
+          与 `item.repeat`，而落库是异步的。
+     这里红了，就一定不是①。 */
   {
     const p = ctx([['a', 'q1', false, 10]], 'detail');
     const it = p.findItem('a');
     it.remindAt = Date.now() + 3 * 3600 * 1000;
     it.leadMin = 5;
+    it.repeat = 0;
     p.openForm(it);
     eq('抽屉预选的是这条自己的提前量（不是默认档）', p.data.form.leadLabel, '提前 5 分钟');
-    eq('下拉枚举首项是「不提醒」', p.data.leadLabels[0], '不提醒');
-    eq('枚举项数与 utils/const.js 的 LEAD_OPTIONS 一致',
-       p.data.leadLabels.length, (CONST_JS.match(/\{ v: /g) || []).length);
+    eq('抽屉预选的是这条自己的周期', p.data.form.repeatLabel, '只提醒一次');
+    // ⚠️ 只在 LEAD_OPTIONS 数组内部数，不能用全文正则 —— v9 新增的
+    // REPEAT_OPTIONS 是同样的 `{ v: ..., label: ... }` 形状，全文匹配会把它的
+    // 两项算进来，于是这条断言会把**正确的代码**判红（假警报比没有检查更糟）。
+    const leadBlock = /const LEAD_OPTIONS = \[([\s\S]*?)\n\];/.exec(CONST_JS);
+    eq('能从 utils/const.js 里抽出 LEAD_OPTIONS 块', !!leadBlock, true);
+    eq('可选提前量项数与 utils/const.js 的 LEAD_OPTIONS 一致',
+       p.data.form.leadOpts.length, (leadBlock[1].match(/\{ v: /g) || []).length);
+    eq('列表首项是「不提醒」', p.data.form.leadOpts[0].label, '不提醒');
+    // ⚠️ 「不提醒」这一档必须自带说明。它是全套文案里最容易误读的一处：
+    // 用户会以为「提醒时间被删了」，而实际上时间还在、只是不发通知。
+    eq('「不提醒」那一档带上了说明', p.data.form.leadOpts[0].hint, '保留提醒时间，只是不发通知');
+    eq('当前档位在列表里被标出来（只标一个）',
+       p.data.form.leadOpts.filter(function (o) { return o.on; }).length, 1);
+    eq('被标的是「提前 5 分钟」', p.data.form.leadOpts.filter(function (o) {
+      return o.on;
+    })[0].label, '提前 5 分钟');
 
-    const idx = p.data.leadLabels.indexOf('提前 1 天');
-    p.onLead({ detail: { value: String(idx) } });
+    // 落库 + 镜像：提前量与周期都要跟着走
+    const i1 = p.data.form.leadOpts.map(function (o) { return o.label; }).indexOf('提前 1 天');
+    p.onLead({ currentTarget: { dataset: { v: String(p.data.form.leadOpts[i1].v) } } });
     eq('选完立刻回显', p.data.form.leadLabel, '提前 1 天');
+    eq('选完顺手收起列表（注意力该回到预览行上）', p.data.form.remOpen, false);
 
     cloudCalls.length = 0;
     p.onSave();
     eq('落库把 leadMin 一起送', last().patch.leadMin, 1440);
-    eq('本地镜像也跟着变（漏了这步，重开抽屉就会变回旧值）', p.findItem('a').leadMin, 1440);
+    eq('落库把 repeat 一起送', last().patch.repeat, 0);
+    eq('本地镜像跟着变（漏了这步，重开抽屉就会变回旧值）', p.findItem('a').leadMin, 1440);
 
     p.openForm(p.findItem('a'));
     eq('重开抽屉看到的是刚才选的那档', p.data.form.leadLabel, '提前 1 天');
-    p.onClearRemind();
-    eq('清除提醒时间后提前量复位成默认档', p.data.form.leadLabel, '提前 30 分钟');
-    eq('清除后也不再有提醒时间', p.data.form.hasRemind, false);
 
-    // 新建这条路：云函数返回 _id 之后客户端才往镜像里 push 那一条（异步）。
-    // 这里只钉**发出去的那一份**，镜像那半交给下面那条静态断言 ——
-    // 把异步分支写成同步断言，得到的会是假绿。
+    /* ⚠️ 脏数据：库里的「每天提醒 + 提前 30 天」。云端 toLead 会夹，但这种组合
+       仍可能出现（手工改过库、或者将来放宽上限之前留下的）。打开抽屉时必须
+       **就地夹掉** —— 不夹就会出现「可选列表里已经没有了『提前 30 天』，
+       而右侧文案还写着它」这种自相矛盾的状态，不报错，只是让用户怀疑自己看错了。 */
+    const dirty = ctx([['b', 'q1', false, 20]], 'detail');
+    const db = dirty.findItem('b');
+    db.remindAt = Date.now() + 3 * 3600 * 1000;
+    db.leadMin = 43200;
+    db.repeat = 1;
+    dirty.openForm(db);
+    eq('脏数据（每天 + 提前 30 天）打开时被夹到 3 小时', dirty.data.form.leadLabel, '提前 3 小时');
+    eq('脏数据下可选档位也只剩 6 项', dirty.data.form.leadOpts.length, 6);
+    eq('夹完之后当前档位仍在列表里被标出', dirty.data.form.leadOpts.filter(function (o) {
+      return o.on;
+    }).length, 1);
+
+    // 一条「每天」的事项重开抽屉：周期 / 图标 / 预览三处都要对上
+    // （这条也把「item.repeat → 界面回显」这条链走了一遍，夹具不再只是默认档）
+    eq('每天事项重开 → 周期回显', dirty.data.form.repeatLabel, '每天提醒');
+    eq('每天事项重开 → 用循环图标', dirty.data.form.remIcon, 'ico-rep');
+    eq('每天事项重开 → 预览行是「每天」句式',
+       dirty.data.form.remPrev.indexOf('每天') > 0, true);
+  }
+
+  /* ---- v9：预览行三句话 + 每天模式的档位夹取 ----
+     预览行是**防选错的最后一道防线**：提前量把 09:00 挪到 08:30，这个位移
+     用户看不见。三种组合的措辞不能复用，所以逐句钉住。
+
+     用「明天 09:00」做夹具，期望值是确定的字符串 —— 拿一个当天日期去测的话，
+     「明天」这个词对不对根本验不出来（今天也是今天）。 */
+  {
+    const dt = new Date();
+    dt.setDate(dt.getDate() + 1);
+    const p2n = function (n) { return n < 10 ? '0' + n : '' + n; };
+    const tomorrow =
+      dt.getFullYear() + '-' + p2n(dt.getMonth() + 1) + '-' + p2n(dt.getDate());
+
+    const p = ctx([], 'detail');
+    p.openForm(null, 'q1');
+
+    // (a) 未设提醒时间：引导语 + 降级样式
+    eq('没设提醒时间 → 预览行是引导语', p.data.form.remPrev, '先设置提醒时间，再选提前多久');
+    eq('没设提醒时间 → 预览行降级', p.data.form.remPrevOff, true);
+    eq('没设提醒时间 → 用静音铃铛', p.data.form.remIcon, 'ico-bell-off');
+    eq('没设提醒时间 → 提醒时间那行显示「不提醒」', p.data.form.dateLabel, '不提醒');
+
+    // 置灰的两行点了不该有反应（不是只靠样式灰着）
+    p.onToggleLead();
+    eq('置灰时展开列表点了没反应', p.data.form.remOpen, false);
+    p.onLead({ currentTarget: { dataset: { v: '180' } } });
+    eq('置灰时选档位点了没反应', p.data.form.leadLabel, '提前 30 分钟');
+    p.onRepeat({ currentTarget: { dataset: { k: '1' } } });
+    eq('置灰时切周期点了没反应', p.data.form.repeatLabel, '只提醒一次');
+
+    // (b) 设了时间：预览行算出实际触发时刻
+    p.onDate({ detail: { value: tomorrow } });
+    p.onTime({ detail: { value: '09:00' } });
+    eq('设完日期就算「已有提醒时间」', p.data.form.hasRemind, true);
+    eq('提醒时间那行显示相对日', p.data.form.dateLabel, '明天');
+    eq('预览行 = 提醒时间 − 提前量（09:00 提前 30 分钟 → 08:30）',
+       p.data.form.remPrev, '将于 明天 08:30 提醒');
+    eq('预览行不降级', p.data.form.remPrevOff, false);
+    eq('用普通铃铛（不是静音的）', p.data.form.remIcon, 'ico-bell');
+
+    // (c) 切「每天」：预览行换句式 + 换成循环图标
+    p.onRepeat({ currentTarget: { dataset: { k: '1' } } });
+    eq('周期回显', p.data.form.repeatLabel, '每天提醒');
+    eq('切到每天 → 预览行换句式', p.data.form.remPrev, '将于 每天 08:30 提醒，从明天起');
+    eq('切到每天 → 换成循环图标', p.data.form.remIcon, 'ico-rep');
+    eq('切到每天 → 分段控件标记跟着走', p.data.form.repeatOpts.filter(function (o) {
+      return o.on;
+    }).length, 1);
+
+    // (d) 每天模式下超 1 天的四档必须消失（10 − 4 = 6）
+    eq('每天模式下可选档位少了 4 项', p.data.form.leadOpts.length, 6);
+    eq('「提前 1 天」已经不在列表里',
+       p.data.form.leadOpts.map(function (o) { return o.v; }).indexOf(1440), -1);
+    eq('「提前 3 小时」是留下的最后一档',
+       p.data.form.leadOpts[p.data.form.leadOpts.length - 1].label, '提前 3 小时');
+
+    // (e) 选到上限那一档：预览行跟着挪到 06:00
+    p.onLead({ currentTarget: { dataset: { v: '180' } } });
+    eq('每天 + 提前 3 小时 → 预览行', p.data.form.remPrev, '将于 每天 06:00 提醒，从明天起');
+
+    // (f) 选「不提醒」：必须明说时间还留着，且整体降级
+    p.onLead({ currentTarget: { dataset: { v: '-1' } } });
+    eq('选不提醒 → 文案明说时间还留着', p.data.form.remPrev, '提醒时间已保留，不会发送通知');
+    eq('选不提醒 → 降级样式', p.data.form.remPrevOff, true);
+    eq('选不提醒 → 静音铃铛', p.data.form.remIcon, 'ico-bell-off');
+    eq('选不提醒 → 提醒时间那行还在（不是被清掉了）', p.data.form.dateLabel, '明天');
+
+    // (g) 从「仅一次 + 提前 30 天」切到每天 → 档位被夹到 3 小时
+    const p3 = ctx([], 'detail');
+    p3.openForm(null, 'q1');
+    p3.onDate({ detail: { value: tomorrow } });
+    p3.onLead({ currentTarget: { dataset: { v: '43200' } } });
+    eq('前提：仅一次可以选到提前 30 天', p3.data.form.leadLabel, '提前 30 天');
+    p3.onRepeat({ currentTarget: { dataset: { k: '1' } } });
+    // ⚠️ 不夹的话界面上会出现「可选列表里没有『提前 30 天』了，而右侧文案还写着它」
+    // 这种自相矛盾的状态 —— 不报错，只是让用户怀疑自己看错了。
+    eq('切到每天 → 提前量被夹到 3 小时', p3.data.form.leadLabel, '提前 3 小时');
+    eq('夹完这一档确实在列表里', p3.data.form.leadOpts.filter(function (o) {
+      return o.on;
+    }).length, 1);
+  }
+
+  /* ---- v9：清除提醒时间 / 周期不清 / 没时间就不送 repeat ---- */
+  {
+    const p = ctx([['a', 'q1', false, 10]], 'detail');
+    const it = p.findItem('a');
+    it.remindAt = Date.now() + 3 * 3600 * 1000;
+    it.leadMin = 60;
+    it.repeat = 1;
+    p.openForm(it);
+
+    p.onClearRemind();
+    eq('清除后不再有提醒时间', p.data.form.hasRemind, false);
+    eq('清除后预览行退回引导语', p.data.form.remPrev, '先设置提醒时间，再选提前多久');
+    eq('清除后展开态也收起', p.data.form.remOpen, false);
+    // ⚠️ 清掉的是「什么时候提醒」，不是「要不要每天」—— 用户并没有改过周期，
+    // 下次再设时间时不该逼他重选一遍。
+    eq('清除提醒时间**不改**周期', p.data.form.repeatLabel, '每天提醒');
+    eq('清除提醒时间**不改**提前量档位', p.data.form.leadLabel, '提前 1 小时');
+
     cloudCalls.length = 0;
+    p.onSave();
+    eq('清除后落库：remindAt 落 null', last().patch.remindAt, null);
+    eq('清除后落库：leadMin 落 null', last().patch.leadMin, null);
+    // ⚠️ payload 里**不该出现** repeat 这个键（不是送 0）。云函数在
+    // `src.repeat === undefined` 时沿用旧值，于是「清除提醒时间」不会顺手把
+    // 用户选的「每天」抹掉。送了 0 的话，他再设一次时间就会发现周期变回一次 ——
+    // 而他从没动过它。
+    eq('清除后落库：payload 里没有 repeat（不是送 0）',
+       Object.prototype.hasOwnProperty.call(last().patch, 'repeat'), false);
+    eq('清除后本地镜像的 repeat 也保持不变', p.findItem('a').repeat, 1);
+  }
+
+  /* ---- v9：新建这条路 ----
+     云函数返回 _id 之后客户端才往镜像里 push 那一条（异步），所以这里只钉
+     **发出去的那一份**，镜像那半交给下面的静态断言 —— 把异步分支写成同步断言，
+     得到的会是假绿。 */
+  {
+    const p = ctx([], 'detail');
+    p.openForm(null, 'q1');
+    p.onDate({ detail: { value: '2026-10-20' } });
+    p.onTime({ detail: { value: '09:00' } });
+    p.onRepeat({ currentTarget: { dataset: { k: '1' } } });
+    p.onLead({ currentTarget: { dataset: { v: '180' } } });
+    p.setData({ 'form.title': '新事项' });
+
+    cloudCalls.length = 0;
+    p.onSave();
+    eq('新建落的是 addItem', last().action, 'addItem');
+    eq('新建也把 leadMin 送上去', last().item.leadMin, 180);
+    eq('新建也把 repeat 送上去', last().item.repeat, 1);
+
+    // 没设提醒时间的新建：payload 里同样不该有 repeat
     const p2 = ctx([], 'detail');
     p2.openForm(null, 'q1');
-    p2.setData({
-      'form.title': '新事项',
-      'form.hasRemind': true,
-      'form.date': '2026-10-20',
-      'form.time': '09:00',
-    });
-    const i2 = p2.data.leadLabels.indexOf('提前 3 小时');
-    p2.onLead({ detail: { value: String(i2) } });
+    p2.setData({ 'form.title': '没提醒的新事项' });
+    cloudCalls.length = 0;
     p2.onSave();
-    eq('新建也把 leadMin 送上去', last().item.leadMin, 180);
-    eq('新建落的是 addItem', last().action, 'addItem');
+    eq('没设提醒时间 → 不送 repeat 字段',
+       Object.prototype.hasOwnProperty.call(last().item, 'repeat'), false);
+    eq('没设提醒时间 → 也不送 leadMin（送的是 null）', last().item.leadMin, null);
   }
   eq('新建后镜像里那条也带 leadMin（静态）',
      /leadMin: payload\.leadMin,/.test(js), true);
+  eq('新建后镜像里那条也带 repeat（静态）',
+     /repeat: payload\.repeat === undefined \? REPEAT_DEFAULT : payload\.repeat,/.test(js), true);
+  eq('编辑后镜像里的 repeat 只在 payload 带了的时候才动（静态）',
+     /if \(payload\.repeat !== undefined\) it\.repeat = payload\.repeat;/.test(js), true);
+
+  /* ---- v9：WXML 接线 ----
+     三参数同卡是靠结构表达的，静态契约盯的是「别被改回三个 field」；
+     置灰靠 class，所以也要钉住它绑在哪两行上。 */
+  {
+    const w = PAGE_WXML;
+    eq('三参数收在一张 .remcard 里', /class="remcard"/.test(w), true);
+    eq('提醒时间行存在', /class="remrow"[\s\S]{0,200}?提醒时间/.test(w), true);
+    // 置灰的两行：提前提醒与重复。提醒时间那行**不能**置灰 ——
+    // 它是「怎么开始设置」的入口，灰掉就没路可走了。
+    eq('提前提醒那一行挂着置灰开关', /class="remrow \{\{form\.hasRemind\?'':'dis'\}\}" bindtap="onToggleLead"/.test(w), true);
+    eq('置灰的行数正好是 2（提前提醒 + 重复，不含提醒时间）',
+       (w.match(/class="remrow \{\{form\.hasRemind\?'':'dis'\}\}"/g) || []).length, 2);
+    eq('重复走两档分段控件', /class="seg \{\{form\.hasRemind\?'':'dis'\}\}"/.test(w), true);
+    eq('十档列表是行内展开（不是第三个抽屉）', /wx:if="\{\{form\.hasRemind && form\.remOpen\}\}"/.test(w), true);
+    eq('预览行挂在卡下', /class="remprev \{\{form\.remPrevOff\?'off':''\}\}"/.test(w), true);
+    // ⚠️ v8 那条授权说明是 hasRemind 就给，于是选了「不提醒」时上下自相矛盾：
+    // 预览行说「不会发送通知」，说明却说「需授权后才能收到」。
+    eq('授权说明只在真的会推送时才出现', /class="subhint" wx:if="\{\{form\.hasRemind && !form\.remPrevOff\}\}"/.test(w), true);
+    eq('确认已删掉旧的三段式布局', /rowline/.test(w), false);
+  }
+
+  /* ---- v9：补额度入口 ---- */
+  {
+    eq('我的页有「补充提醒额度」入口', /bindtap="onTopUpQuota"/.test(PAGE_WXML), true);
+    eq('入口方法存在且复用 askSubscribe（不另开一条调用链）',
+       /onTopUpQuota\(\) \{\s*this\.askSubscribe\(\);\s*\}/.test(js), true);
+    eq('重复提醒每天烧额度的现实写在说明里', /每天都要一条额度/.test(PAGE_WXML), true);
+  }
 }
 
 /* ==================================================================

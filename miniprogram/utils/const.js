@@ -70,7 +70,11 @@ const REORDER_CAP = 200;
 //     fqRemind 的扫描条件从 remindAt 换成 pushAt。同样**没有新增 action** ——
 //     旧云函数不认识 leadMin，表现是「选好的提前量重进一次就变回 30 分钟」。
 //     ⚠️ fqRemind 不在 action 清单里，握手管不到它，改完要记得单独重新部署。
-const FN_VER = 8;
+// v9：提醒周期（只提醒一次 / 每天提醒）。fq_items 多出 repeat 字段，fqRemind
+//     多出一套「发完把 pushAt 滚到下一个整天」的循环逻辑。还是**没有新增 action**
+//     —— 旧云函数不认识 repeat，表现是「选了每天提醒，第二天就再也不响了」。
+//     ⚠️ fqRemind 这次同样必须单独重新部署：它不在 action 清单里，握手管不到它。
+const FN_VER = 9;
 
 // 自动同步的轮询间隔。页面可见时每 8 秒问一次「家庭数据变了没」，
 // 云函数只回一个 rev 数字，没变就是几十字节。
@@ -119,6 +123,29 @@ const LEAD_OPTIONS = [
 // v8 之前的老数据也没有这个字段，读到 undefined 时一律按它兜底。
 const LEAD_DEFAULT = 30;
 
+// 「每天提醒」模式下提前量的上限（分钟）。与 fqTodo 的 LEAD_DAILY_MAX 成对。
+// 客户端藏档位只是体验，云端还会再夹一次（前端能绕过，后端不能信任）。
+const LEAD_DAILY_MAX = 180;
+
+/* ---------------- 提醒周期（v9） ---------------- */
+
+// 0 = 只提醒一次（默认），1 = 每天提醒。
+//
+// ⚠️ 为什么「每天提醒」要把提前量收到 1 天以内（LEAD_DAILY_MAX）：
+//    「每天提醒」+「提前 30 天」字面读出来是「提前 30 天起、每天推一条」——
+//    等于连推 30 条同一件事。而会用到「每天提醒」的场景（吃药、锻炼、喂水、
+//    喂猫）本来就不需要提前几天，所以直接把这组档位收掉，比让用户自己承担
+//    这个组合的后果干净。
+//    夹取的失败方向也是安全的：从「提前 30 天」夹到「提前 3 小时」是**发得晚**
+//    而不是**不发**，用户看得见也改得回来（与 -1 哨兵那条同一个原则）。
+const REPEAT_OPTIONS = [
+  { v: 0, label: '只提醒一次' },
+  { v: 1, label: '每天提醒' },
+];
+
+// 没设过的（含 v9 之前的老数据）一律按「只提醒一次」兜底。
+const REPEAT_DEFAULT = 0;
+
 /* ---------------- 今日饮水 ---------------- */
 
 // 每日饮水目标（ml）。唯一来源：页面传给组件 fq-water 的 goal，组件默认值也读这里。
@@ -162,6 +189,9 @@ module.exports = {
   WRITE_ACTIONS: WRITE_ACTIONS,
   LEAD_OPTIONS: LEAD_OPTIONS,
   LEAD_DEFAULT: LEAD_DEFAULT,
+  LEAD_DAILY_MAX: LEAD_DAILY_MAX,
+  REPEAT_OPTIONS: REPEAT_OPTIONS,
+  REPEAT_DEFAULT: REPEAT_DEFAULT,
   WATER_GOAL: WATER_GOAL,
   WATER_KEY: WATER_KEY,
   PLAN_MAX: PLAN_MAX,

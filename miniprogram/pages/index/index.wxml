@@ -380,9 +380,15 @@
             <text class="nm">{{subMissed}} 条提醒未送达</text>
             <text class="ct">看原因</text>
           </view>
+          <!-- 补额度入口（v9）。必须是一个**用户点得着的按钮**：微信的
+               requestSubscribeMessage 只能在用户交互后调，自动弹既不合规
+               也会被当成莫名其妙。「每天提醒」尤其需要它 —— 那种提醒每天
+               烧一条额度，点一次「允许」攒一条，第二天就用光了。 -->
+          <view class="func" bindtap="onTopUpQuota">补充提醒额度<text class="arw">›</text></view>
           <!-- 额度是「按条」的，这一点必须说清楚：微信的一次性订阅，
                点一次允许只买到一条消息，不是买到长期推送。 -->
           <text class="hint flat">每条提醒按它自己设的提前量推到微信服务通知（没设过就按默认的提前 30 分钟）；额度按条计算，用完就不再推，但提醒时间仍然存着</text>
+          <text class="hint flat">选「每天提醒」的事项每天都要一条额度 —— 它不会自动续，需要你在这里补</text>
         </view>
 
         <view class="mecard">
@@ -582,33 +588,113 @@
           </view>
         </view>
 
+        <!-- 提醒三参数（v9）：提醒时间 / 提前提醒 / 重复 收进**一张卡** ——
+             它们不是三件独立的事，而是同一个提醒的三个坐标（哪天几点 /
+             提前多久开口 / 说一次还是每天说）。排成三个独立 field，视觉上
+             等于逼用户把一件事拆成三件来做。
+             ⚠️ 没设提醒时间时，下面两行**整体置灰而不是隐藏**：隐藏会让用户
+             以为「这个能力不存在」，置灰至少让他知道「有这回事，但要先填时间」。
+             置灰的两行在 handler 里直接 return（不响应），而不是只靠样式 ——
+             一个点了有反应的灰行比灰行本身更让人犯嘀咕。 -->
         <view class="field">
-          <text class="label">提醒时间</text>
-          <view class="rowline">
-            <picker class="pdate" mode="date" value="{{form.date}}" bindchange="onDate">
-              <view class="pick {{form.hasRemind?'':'ph'}}">{{form.dateLabel}}</view>
-            </picker>
-            <picker class="ptime" mode="time" value="{{form.time}}" bindchange="onTime">
-              <view class="pick right">{{form.time}}<view class="ico ico-chev-r"></view></view>
-            </picker>
-            <view class="clear" wx:if="{{form.hasRemind}}" bindtap="onClearRemind">清除</view>
-          </view>
-        </view>
+          <text class="label">提醒</text>
 
-        <!-- 提前提醒时长（v8）。**只在设了提醒时间时出现** —— 没有提醒时间
-             就谈不上「提前多久」。用条件渲染而不是置灰：一个永远点不动的选项
-             比不出现更让人困惑，用户会以为「这里本该能选」。
-             下面的小字是授权说明，不是可选项的一部分 —— 用户得先知道
-             「收得到收不到取决于授权」，才不会把「没收到」当成 bug。 -->
-        <view class="field" wx:if="{{form.hasRemind}}">
-          <text class="label">提前提醒</text>
-          <picker mode="selector" range="{{leadLabels}}" value="{{form.leadIdx}}" bindchange="onLead">
-            <view class="rowline">
-              <view class="pick">{{form.leadLabel}}</view>
-              <view class="ico ico-chev-r"></view>
+          <view class="remcard">
+            <!-- 提醒时间：日期与时间各挂一个系统 picker。不自绘胶囊 ——
+                 胶囊只能列今天/明天/后天…六个日子、8 个整点，而提醒恰恰
+                 经常需要「下个月 23 号」「上班前 10 分钟」这种取值。
+                 这一行在未设提醒时**仍然可点**（点日期开始设置），
+                 所以它不参与置灰。 -->
+            <view class="remrow">
+              <text class="rk">提醒时间</text>
+              <view class="rv">
+                <picker class="pkd" mode="date" value="{{form.date}}" bindchange="onDate">
+                  <text class="{{form.hasRemind?'':'ph'}}">{{form.dateLabel}}</text>
+                </picker>
+                <picker
+                  wx:if="{{form.hasRemind}}"
+                  class="pkt"
+                  mode="time"
+                  value="{{form.time}}"
+                  bindchange="onTime"
+                >
+                  <text class="tm">{{form.time}}</text>
+                </picker>
+                <view class="ico ico-chev-r"></view>
+              </view>
+              <text class="clr" wx:if="{{form.hasRemind}}" catchtap="onClearRemind">清除</text>
             </view>
-          </picker>
-          <text class="subhint">这是微信内部提醒，需你同意授权后才能收到；未授权时提醒仍会保存，但不会推送到微信</text>
+
+            <!-- 提前提醒：整行是「展开 / 收起十档列表」的开关。
+                 选项多、标签长，平铺会把抽屉撑到必须滚动，所以走行内展开，
+                 而不是再挂第三个抽屉（多一层进出，选个提前量要点两次返回）。 -->
+            <view class="remrow {{form.hasRemind?'':'dis'}}" bindtap="onToggleLead">
+              <text class="rk">提前提醒</text>
+              <view class="rv">
+                <text class="{{form.hasRemind?'':'ph'}}">{{form.hasRemind ? form.leadLabel : '先设置提醒时间'}}</text>
+                <!-- 「默认」徽标挂在 30 分钟那一档：它同时是「从没设过」的
+                     兜底值，用户看到它才知道自己什么都没动过。 -->
+                <text class="def" wx:if="{{form.hasRemind && form.leadDef}}">默认</text>
+                <view class="ico {{form.remOpen?'ico-chev-dn':'ico-chev-r'}}" wx:if="{{form.hasRemind}}"></view>
+              </view>
+            </view>
+
+            <!-- 十档提前量（行内展开）。
+                 ⚠️ 「每天提醒」模式下藏掉超 1 天的四档 —— 「每天提醒 + 提前 30 天」
+                 字面读出来就是「提前 30 天起、每天推一条」，等于连推 30 条同一件事，
+                 还会把攒下的额度一次烧光。客户端藏只是体验（别让用户选出来），
+                 云端 toLead 还会再夹一次（选出来了也不许生效）。 -->
+            <block wx:if="{{form.hasRemind && form.remOpen}}">
+              <view
+                class="optrow {{item.on?'on':''}}"
+                wx:for="{{form.leadOpts}}"
+                wx:key="v"
+                data-v="{{item.v}}"
+                bindtap="onLead"
+              >
+                <view class="ov">
+                  <text class="ol">{{item.label}}</text>
+                  <text class="oh" wx:if="{{item.hint}}">{{item.hint}}</text>
+                </view>
+                <view class="ck2" wx:if="{{item.on}}">✓</view>
+              </view>
+            </block>
+
+            <!-- 重复：只有两项且互斥 → 分段控件。比 picker 少一次点击，
+                 而且当前状态一直可见（picker 收起后只剩一行文字，用户
+                 得点开才能想起来自己选的是哪个）。 -->
+            <view class="remrow {{form.hasRemind?'':'dis'}}">
+              <text class="rk">重复</text>
+              <view class="seg {{form.hasRemind?'':'dis'}}">
+                <view
+                  class="sg {{item.on?'on':''}}"
+                  wx:for="{{form.repeatOpts}}"
+                  wx:key="label"
+                  data-k="{{item.idx}}"
+                  bindtap="onRepeat"
+                >{{item.label}}</view>
+              </view>
+            </view>
+          </view>
+
+          <!-- 卡下这行预览是**防选错的最后一道防线**：提前量把 09:00 挪到
+               08:30，这个位移用户是看不见的 —— 不算出来摆在他眼前，选错档位
+               要等到提醒来了（或压根没来）才会发现。
+               三种组合三句话，措辞不复用：「不提醒」必须明说时间还留着，
+               否则用户会以为提醒被清掉了。 -->
+          <view class="remprev {{form.remPrevOff?'off':''}}">
+            <view class="ico {{form.remIcon}}"></view>
+            <text class="pt">{{form.remPrev}}</text>
+          </view>
+
+          <!-- 授权说明。它和预览行是两件事，所以不合并：
+               预览行说「什么时候响」，这句说「能不能收到」—— 用户得先知道
+               「收得到收不到取决于授权」，才不会把「没收到」当成 bug。
+
+               ⚠️ 只在**真的会推送**时出现。v8 那版是 hasRemind 就给，
+               于是选了「不提醒」时上下两行自相矛盾：上面说「不会发送通知」，
+               下面说「需授权后才能收到」。 -->
+          <text class="subhint" wx:if="{{form.hasRemind && !form.remPrevOff}}">这是微信内部提醒，需你同意授权后才能收到；未授权时提醒仍会保存，但不会推送到微信</text>
         </view>
 
       </scroll-view>

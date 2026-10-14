@@ -10,7 +10,7 @@
 //
 // 集合（与前两个函数同一套）：
 //   fq_items  { ..., _openid, fid, title, note, quad, catId, remindAt, leadMin, pushAt,
-//               pushed, pushedAt, pushOk, pushErr }
+//               repeat, pushed, pushedAt, pushOk, pushErr }
 //   fq_categories { _id, fid, name }
 //   fq_subs   { _openid, quota, lastGrantAt, updatedAt }
 //   fq_family { ..., rev }
@@ -35,8 +35,14 @@
 // · 额度在「扣了但发送失败」时不退还。正常失败（43101 用户拒收、
 //   模板字段超限）里，额度其实已经真被消耗掉了，退了反而记账不准；
 //   网络抖动这种小概率事件，退与不退都说得过去，选了简单的那边。
-// · 一条提醒只发一次。发出去之后用户改了提醒时间**或提前量**，由 fqTodo 的
+// · 一条提醒只发一次。发出去之后用户改了提醒时间 / 提前量 / 周期，由 fqTodo 的
 //   updateItem 把 pushed 复位、pushAt 重算，它才重新排进队列（见那边「提醒这一组」）。
+//   ⚠️ v9 的「每天提醒」是这条的例外，而且是**必须的例外**：它的 pushed 一直
+//   保持未处理态（下一轮 tick 还要再发它），去重改由 pushAt 承担 —— 详见 claim。
+// · 「每天提醒」每天消耗一条额度。用户点一次「允许」只攒一条发送权，所以
+//   从第二天起就会开始缺额度，表现为每天记一条 no-quota。这不是 bug，是一次性
+//   订阅这个前提下的必然结果；客户端的「我的」页给了一个补额度入口
+//   （wx.requestSubscribeMessage 必须由用户点击触发，不能自动弹）。
 
 const cloud = require('wx-server-sdk');
 
@@ -70,6 +76,14 @@ const PAGE_PATH = 'pages/index/index';
 const LEAD_ALLOWED = [-1, 5, 10, 30, 60, 180, 1440, 4320, 10080, 43200];
 const LEAD_DEFAULT = 30;
 
+// 提醒周期：1 = 每天提醒（0 是「只提醒一次」，也是缺省）。
+// 与 fqTodo 的 REPEAT_DAILY、utils/const.js 的 REPEAT_OPTIONS 一致。
+// ⚠️ 本函数不校验提前量上限（那是 fqTodo 的 toLead 夹的），所以这里
+// **不需要** LEAD_DAILY_MAX —— 少一个要在三处同步的常量。
+const REPEAT_DAILY = 1;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 // 迟到容忍：超过这个还没发出去，就别补发了 ——
 // 一条几小时前的提醒突然弹出来只会让人困惑。但也不能静默丢弃，
 // 记成 expired（未送达），用户在小程序里看得见。
@@ -93,10 +107,14 @@ const QUAD_NAME = {
 
 /* ---------------- 工具 ---------------- */
 
-// 提前量净化 + 推送时刻推算。与 fqTodo 里的同名函数**逐字一致** ——
-// 两个云函数不共享代码，只能各留一份，靠 test-remind 读源码比对防漂移。
-// 回填老数据时必然用到，所以放在这里而不是内联：让「两边算法相同」这件事
-// 在源码层面看得见、也测得到。
+// 提前量净化 + 推送时刻推算。与 fqTodo 里的同名函数**同源**，靠 test-remind
+// 读源码比对防漂移。回填老数据时必然用到，所以放在这里而不是内联：
+// 让「两边算法相同」这件事在源码层面看得见、也测得到。
+//
+// ⚠️ toLead 比 fqTodo 那份**少一个 repeat 参数**，这是有意的：本函数用它只做
+// 老数据回填，而那批文档一律是 v8 之前建的、全是「仅一次」，不存在
+// 「每天提醒要把提前量夹到 1 天以内」这个场景。挂一个永远传 0 的参数，
+// 只会让「两边签名为什么不一样」变成一个以后要反复解释的问题。
 function toLead(v) {
   const n = Math.round(Number(v));
   return LEAD_ALLOWED.indexOf(n) >= 0 ? n : LEAD_DEFAULT;
@@ -107,6 +125,24 @@ function toPushAt(remindAt, leadMin) {
   if (!Number.isFinite(at) || at <= 0) return null;
   if (leadMin === -1) return null;
   return at - leadMin * 60000;
+}
+
+// 「每天提醒」的下一次推送时刻：从当前 pushAt 起，按整天往前挪到
+// **严格大于 now** 的第一个时刻。
+//
+// 为什么是「挪到下一个未来时刻」而不是简单 +1 天：云函数停过几天、或者用户
+// 刚把「一次」改成「每天」时，pushAt 可能已经过去很久。若只 +1 天，它仍旧
+// 在过去 → 下一轮又判一次 → 要连跑好几天才追上现在。
+// 用除法一次算出该跳几天，而不是 while 累加 —— 极端情况下（一条 2020 年的
+// 提醒）while 要转两千圈，除法一圈都不用。
+// 取 floor + 1 而不是 ceil，是为了保证结果**严格大于** now：等于 now 的话
+// 下一轮 tick 还会把它捞出来，白白多跑一轮。
+function nextDailyPushAt(pushAt, now) {
+  const at = Number(pushAt);
+  if (!Number.isFinite(at) || at <= 0) return null;
+  if (at > now) return at; // 还没到点，不用动
+  const k = Math.floor((now - at) / DAY_MS) + 1;
+  return at + k * DAY_MS;
 }
 
 function pad2(n) {
@@ -256,12 +292,33 @@ async function backfillPushAt() {
 // 抢锁。返回 true 表示「这一条归我了」。
 // 触发器重复触发时，两条并发实例里只有一条能拿到 stats.updated === 1，
 // 另一条拿到 0 —— 这就是去重，不需要额外的锁表。
-async function claim(item, patch) {
+//
+// ⚠️ 第三个参数 nextAt 是「每天提醒」的专用路径，也是这里唯一会咬人的地方。
+//
+//   普通提醒靠「写入 pushed: true」去重：条件里的 `pushed: neq(true)` 在写入
+//   之后就不再成立，第二条并发实例自然拿到 updated: 0。干净。
+//
+//   但每天提醒**不能**把 pushed 写成 true —— 它下一轮 tick 还要再发，必须保持
+//   未处理态（fetchDue 的条件里也有 neq(true)）。而那个条件在写入前后**都成立**，
+//   于是两条并发实例会双双拿到 updated: 1：同一件事被推两遍，额度也被扣两次。
+//   所以改成「拿 pushAt 当版本号」：条件里带上我刚读到的那个 pushAt，
+//   第一条把它滚到下次之后，第二条的 where 就不再匹配了。
+//
+//   滚动与「保持未处理态」必须在**同一次 update** 里完成。拆成两次写会留下中间态
+//   （已经滚走了、pushed 却仍是 true），那条提醒就永远不再响了 —— 而且不报错。
+async function claim(item, patch, nextAt) {
+  const where = { _id: item._id, done: _.neq(true) };
+  const data = Object.assign({ pushedAt: db.serverDate() }, patch);
+  if (nextAt) {
+    where.pushAt = item.pushAt;
+    data.pushAt = nextAt;
+    data.pushed = false;
+  } else {
+    where.pushed = _.neq(true);
+    data.pushed = true;
+  }
   try {
-    const res = await db
-      .collection(COL_ITEMS)
-      .where({ _id: item._id, done: _.neq(true), pushed: _.neq(true) })
-      .update({ data: Object.assign({ pushed: true, pushedAt: db.serverDate() }, patch) });
+    const res = await db.collection(COL_ITEMS).where(where).update({ data: data });
     return res.stats.updated === 1;
   } catch (e) {
     return false;
@@ -294,6 +351,16 @@ async function spend(openid) {
 async function push(item) {
   const cat = await catName(item.catId, item.fid);
 
+  // 通知里显示的「提醒时间」用**本次实际的提醒时刻** = pushAt + 提前量，
+  // 而不是 item.remindAt。对「只提醒一次」两者永远相等（pushAt 本来就是从
+  // remindAt 减出来的），但对「每天提醒」就分道扬镳了：remindAt 是用户设的
+  // **起点**、一直不动，pushAt 才是滚到今天的那个时刻。用 remindAt 会在
+  // 10 月 20 日这天告诉用户「提醒时间 2026-10-15 09:00」，白白让人以为发错了。
+  // lead ≤ 0（选「不提醒」时是 -1）不会走到这里 —— 那种条目 pushAt 是 null，
+  // 挑不进候选；这里仍然夹一道，免得算出个 NaN 把整条消息打成 47003。
+  const lead = toLead(item.leadMin);
+  const pushMs = Number(item.pushAt) + (lead > 0 ? lead : 0) * 60000;
+
   // 5 个槽一个都不能少、不能空：选用模板时勾了几个字段，
   // 代码里就得赋几个非空值，缺一个整条消息 47003 全灭。
   await cloud.openapi.subscribeMessage.send({
@@ -307,7 +374,7 @@ async function push(item) {
       thing15: { value: QUAD_NAME[item.quad] || QUAD_NAME.q1 },  // 事项类型 = 所在象限
       thing12: { value: clipThing(item.note) },                 // 备注消息
       thing1: { value: clipThing(cat) },                        // 事项主题 = 分类名
-      time23: { value: fmtTime(item.remindAt) },                // 提醒时间
+      time23: { value: fmtTime(pushMs) },                       // 提醒时间
     },
   });
 }
@@ -324,7 +391,11 @@ exports.main = async () => {
     scanned: rows.length,
     backfilled: backfilled,
     sent: 0,
+    // expired 与 rolled 是两件事，别合并计数：
+    // expired = 该发没发成（用户要看见的「未送达」），
+    // rolled  = 每天提醒按计划滚到下一轮（正常行为，不该报给用户）。
     expired: 0,
+    rolled: 0,
     noQuota: 0,
     failed: 0,
     skipped: 0,
@@ -339,17 +410,28 @@ exports.main = async () => {
     const at = Number(it.pushAt);
     if (!Number.isFinite(at) || at <= 0) continue;
 
+    // 「每天提醒」的下次时刻必须先算出来：下面三条路（过期 / 正常 / 发送失败）
+    // 都得把它交给 claim 去滚。漏掉任何一条，那条提醒都会卡死在原地不再响。
+    const nextAt = it.repeat === REPEAT_DAILY ? nextDailyPushAt(at, now) : null;
+
     // 早就过点了：容器冷启动、触发器漏跑都会造成这个。
     // 不补发，但也不静默丢弃 —— 记成未送达。
+    //
+    // ⚠️ 每天提醒在这里要分开处理：它的 pushAt 停在一个过去的时刻是**设计内**
+    // 的状态（用户刚把「一次」改成「每天」，或者云函数停了几天），滚到下一个
+    // 整天就完事了，不该记成「未送达」—— 那会让用户在「我的」页看到一条根本
+    // 不存在的失败。所以 pushErr 置空，只留 pushedAt 表示「处理过」。
     if (at < now - LATE_MS) {
-      if (await claim(it, { pushOk: false, pushErr: 'expired' })) {
-        stat.expired++;
+      const rolled = !!nextAt;
+      if (await claim(it, { pushOk: false, pushErr: rolled ? '' : 'expired' }, nextAt)) {
+        if (rolled) stat.rolled++;
+        else stat.expired++;
         touched.add(it.fid);
       }
       continue;
     }
 
-    if (!(await claim(it, { pushOk: false, pushErr: '' }))) {
+    if (!(await claim(it, { pushOk: false, pushErr: '' }, nextAt))) {
       stat.skipped++;
       continue;
     }

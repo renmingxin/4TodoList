@@ -369,8 +369,14 @@ async function run() {
   console.log('\n[8] 时间格式：必须是北京时间的 YYYY-MM-DD HH:MM');
   {
     seed({ quota: 3 });
-    const at = Date.now() + 5 * MIN;
-    mkItem({ remindAt: at });
+    // 夹具统一从一个**早于 main()** 的锚点出发，反推两个值：
+    //   pushAt 必须是过去，否则 fetchDue 的 `pushAt <= now` 挑不到它；
+    //   而「提醒时刻」= pushAt + 提前量又要是我们想验证的那个值。
+    // ⚠️ 别写成 `pushAt: Date.now()` —— 它和 main() 之间隔着几毫秒，
+    // 同值比较的结果就不确定了（v8 在 LATE_MS 边界上踩过同样的坑）。
+    const t0 = Date.now() - 1000;
+    const at = t0 + 5 * MIN;
+    mkItem({ remindAt: at, leadMin: 5, pushAt: t0 });
 
     await fn.main();
     const got = calls()[0].data.time23.value;
@@ -380,6 +386,24 @@ async function run() {
     // 这条才真正钉住「时区被处理过」。用固定时间戳做一次确定性对照：
     eq('固定时间戳 2026-10-01T00:50Z → 北京 08:50', bjString(Date.UTC(2026, 9, 1, 0, 50)), '2026-10-01 08:50');
     ok('北京时间不是 UTC 裸值', got !== utcNaive(at));
+
+    // ⚠️ v9：每天提醒的 remindAt 是**起点**（一直不动），pushAt 才是滚到今天的
+    // 那个时刻。通知里必须用后者 —— 用 remindAt 会在 10 月 20 日那天告诉用户
+    // 「提醒时间 10 月 15 日」，白白让人以为发错了。
+    // 夹具故意把起点放在 40 天前，两者差得足够远，这条断言才有区分度。
+    //
+    // ⚠️ leadMin 必须取白名单里的档位。第一版这里写的是 3（"3 分钟"看着更顺眼），
+    // 而 LEAD_ALLOWED 是 [-1,5,10,30,60,180,...] —— toLead(3) 会静默回落成
+    // LEAD_DEFAULT=30，于是断言差了 27 分钟。测试红了半小时才定位到是**夹具**
+    // 用了非法档位，而实现完全是对的。教训：夹具里的每一个枚举值都得是白的。
+    const t1 = Date.now() - 1000;
+    const at2 = t1 + 10 * MIN;
+    const it2 = mkItem({ remindAt: at2 - 40 * 86400000, leadMin: 10, pushAt: t1, repeat: 1 });
+    await fn.main();
+    const lastCall = calls()[calls().length - 1];
+    eq('每天提醒的通知里显示的是本次时刻，不是起点',
+       lastCall.data.time23.value, bjString(at2));
+    ok('确实不是那个 40 天前的起点', lastCall.data.time23.value !== bjString(row(it2._id).remindAt));
   }
 
   console.log('\n[9] 一条提醒 = 一条额度：额度先到先用，用完就停');
@@ -495,7 +519,12 @@ async function run() {
     };
     const remindLead = allowedOf(remindSrc);
     const todoLead = allowedOf(todoSrc);
-    const clientLead = (clientConst.match(/\{ v: (-?\d+), label:/g) || [])
+    // ⚠️ 只在 LEAD_OPTIONS 块里抽，不能全文匹配 —— v9 新增的 REPEAT_OPTIONS
+    // 是同样的 `{ v: ..., label: ... }` 形状，全文匹配会把 0 / 1 混进来，
+    // 于是「客户端枚举与云端白名单一致」会把正确的代码判红。
+    const leadBlock = /const LEAD_OPTIONS = \[([\s\S]*?)\n\];/.exec(clientConst);
+    ok('能从 utils/const.js 里抽出 LEAD_OPTIONS 块', !!leadBlock);
+    const clientLead = (leadBlock[1].match(/\{ v: (-?\d+), label:/g) || [])
       .map(function (s) {
         return /(-?\d+)/.exec(s)[1];
       })
@@ -517,6 +546,38 @@ async function run() {
     ok('fqRemind 按 pushAt 扫', /pushAt: _\.and\(_\.gt\(0\), _\.lte\(now\)\)/.test(remindSrc));
     ok('fqRemind 的到期判据用 pushAt', /const at = Number\(it\.pushAt\)/.test(remindSrc));
     ok('fqTodo 预算 pushAt', /pushAt: toPushAt\(/.test(todoSrc));
+
+    // ---- v9：提醒周期，同样抄了三份 ----
+    // ⚠️ 这三份与上面 LEAD_OPTIONS 是同一类风险，但**方向相反**：提前量漏改一处
+    // 是「界面能选、云端不认」（静默丢掉）；周期漏改一处是「界面选每天、
+    // 云端按一次处理」（用户第二天发现不响）或者反过来的「云端每天发、
+    // 界面显示仅一次」（额度被悄悄烧掉）。两种都不可见，所以必须有个守卫。
+    const repeatBlock = /const REPEAT_OPTIONS = \[([\s\S]*?)\n\];/.exec(clientConst);
+    ok('能从 utils/const.js 里抽出 REPEAT_OPTIONS 块', !!repeatBlock);
+    const clientRepeat = (repeatBlock[1].match(/\{ v: (-?\d+), label:/g) || [])
+      .map(function (s) {
+        return /(-?\d+)/.exec(s)[1];
+      })
+      .join(',');
+    eq('客户端周期枚举就是 0 / 1', clientRepeat, '0,1');
+    eq('客户端默认周期是 0（只提醒一次）', /const REPEAT_DEFAULT = 0/.test(clientConst), true);
+
+    const todoRepeat = /const REPEAT_DAILY = (\d+);/.exec(todoSrc);
+    const remindRepeat = /const REPEAT_DAILY = (\d+);/.exec(remindSrc);
+    ok('fqTodo 有 REPEAT_DAILY', !!todoRepeat);
+    ok('fqRemind 有 REPEAT_DAILY', !!remindRepeat);
+    eq('两个云函数的 REPEAT_DAILY 一致', todoRepeat[1], remindRepeat[1]);
+    eq('云端的 REPEAT_DAILY 就是客户端枚举里的「每天」那一项', todoRepeat[1], clientRepeat.split(',')[1]);
+
+    // 每天模式的提前量上限：只有**写入方**（fqTodo）需要它，fqRemind 有意不设。
+    // 这条把「有意不设」钉成断言，免得以后有人为了「对称」在 fqRemind 里也加一份，
+    // 那就是第四个要同步的常量了 —— 而它永远用不上。
+    eq(
+      '每天模式提前量上限两处都是 180',
+      /const LEAD_DAILY_MAX = 180/.test(clientConst) && /const LEAD_DAILY_MAX = 180/.test(todoSrc),
+      true
+    );
+    ok('fqRemind 里没有这个常量（有意：夹取只发生在写入方）', !/LEAD_DAILY_MAX/.test(remindSrc.replace(/\/\/[^\n]*/g, '')));
   }
 
   console.log('\n[13] 老数据回填：v8 之前的事项没有 pushAt，第一轮就得补上');
@@ -560,6 +621,86 @@ async function run() {
     eq('也不会被当成推送候选', r.data.scanned, 0);
     eq('额度没动', quotaOf('openid-me'), 5);
     eq('接口没调', calls().length, 0);
+  }
+
+  console.log('\n[15] v9「每天提醒」：发完滚到明天、去重换 pushAt、失败也照滚');
+  {
+    const DAY = 24 * 60 * MIN;
+    const t = Date.now() - 1000;
+
+    /* (a) 到点：发一条，pushAt 往后滚一天，pushed 保持未处理态 */
+    seed({ quota: 5 });
+    const d1 = mkItem({ remindAt: t + 10 * MIN, leadMin: 10, pushAt: t, repeat: 1 });
+    let r = await fn.main();
+    eq('每天提醒到点 → 照常发出去', r.data.sent, 1);
+    eq('不算过期', r.data.expired, 0);
+    eq('也不算「已滚」（这次是真发了）', r.data.rolled, 0);
+    eq('pushAt 滚到明天同一时刻', row(d1._id).pushAt, t + DAY);
+    // ⚠️ 这是「每天提醒」与普通提醒**行为上唯一的区别**：pushed 必须留在未处理态，
+    // 下一轮 tick 还要再发它。写成 true 的话它只响一次就永远安静了 ——
+    // 而且用户看不出哪里出了错（他会以为是自己没设对）。
+    eq('pushed 保持未处理态（明天还要再发）', row(d1._id).pushed, false);
+    ok('留下了处理时间', !!row(d1._id).pushedAt);
+
+    /* (b) 紧接着再来一轮：pushAt 已经在未来，挑不到 */
+    r = await fn.main();
+    eq('同一分钟内不会再发一次', r.data.scanned, 0);
+    eq('全程只调了 1 次接口', calls().length, 1);
+    eq('额度只扣了 1 条', quotaOf('openid-me'), 4);
+
+    /* (c) 滚动要一次跳到「严格大于 now」，不是每轮 +1 天慢慢追 */
+    seed({ quota: 3 });
+    const start = t - 40 * DAY;
+    const stale = mkItem({ remindAt: t + 10 * MIN, leadMin: 10, pushAt: start, repeat: 1 });
+    r = await fn.main();
+    eq('停了 40 天的每天提醒：算「已滚」，不算「未送达」', r.data.rolled, 1);
+    eq('不算过期', r.data.expired, 0);
+    // 记成 expired 会让「我的」页显示一条**根本没发生过**的失败，用户会去查手机通知设置。
+    eq('不记未送达', row(stale._id).pushErr, '');
+    eq('本轮不发（滚不是补发）', r.data.sent, 0);
+    const rolled = row(stale._id).pushAt;
+    ok('一次就跳到未来', rolled > Date.now());
+    ok('落点与起点同相位（相差整天，不是「现在 + 1 天」）', (rolled - start) % DAY === 0);
+    eq('恰好跳到下一个整天（不是跳两个）', rolled, start + 41 * DAY);
+    eq('滚完也不该被同一轮再捞一次', (await fn.main()).data.scanned, 0);
+
+    /* (d) 额度不足也要滚：否则补上额度之后它还停在原地 */
+    seed({ quota: 0 });
+    const nq = mkItem({ remindAt: t + 10 * MIN, leadMin: 10, pushAt: t, repeat: 1 });
+    r = await fn.main();
+    eq('没额度 → 记 no-quota', r.data.noQuota, 1);
+    eq('原因落到文档上', row(nq._id).pushErr, 'no-quota');
+    eq('pushAt 照样往后滚（明天还有机会）', row(nq._id).pushAt, t + DAY);
+
+    /* (e) 发送失败也要滚 —— 三条路（过期 / 正常 / 失败）一条都不能漏 */
+    seed({ quota: 3 });
+    FC.openapi.queue = [{ errCode: 43101, errMsg: 'user refuse to accept the msg' }];
+    const bad = mkItem({ remindAt: t + 10 * MIN, leadMin: 10, pushAt: t, repeat: 1 });
+    r = await fn.main();
+    eq('发送失败计入 failed', r.data.failed, 1);
+    eq('失败也照滚，不会每分钟重试到天荒地老', row(bad._id).pushAt, t + DAY);
+
+    /* (f) 反向对照：「仅一次」不能被同一轮改动带歪 */
+    seed({ quota: 3 });
+    const once = mkItem({ remindAt: t + 10 * MIN, leadMin: 10, pushAt: t });
+    r = await fn.main();
+    eq('「仅一次」照旧只发一次', row(once._id).pushed, true);
+    eq('pushAt 原地不动（没被误当成每天）', row(once._id).pushAt, t);
+
+    /* (g) ⚠️ 并发去重：这是本轮最会咬人的一条
+     * 普通提醒靠「写入 pushed: true」去重 —— 那个条件在写入之后就不成立了。
+     * 每天提醒**不能**写 pushed: true（下一轮还要发），于是条件在写入前后**都成立**，
+     * 两条并发实例会双双拿到 updated: 1：同一件事推两遍，额度也扣两份。
+     * 所以去重改由 pushAt 当版本号承担 —— 把刚读到的旧 pushAt 写进 where。
+     * 少了那个条件，这条断言就红。 */
+    seed({ quota: 5 });
+    const cd = mkItem({ remindAt: t + 10 * MIN, leadMin: 10, pushAt: t, repeat: 1 });
+    const both = await Promise.all([fn.main(), fn.main()]);
+    eq('并发两实例合计只发 1 条', both[0].data.sent + both[1].data.sent, 1);
+    eq('只调了 1 次接口', calls().length, 1);
+    eq('额度只扣 1 条', quotaOf('openid-me'), 4);
+    eq('pushAt 只滚了一次（滚两次就跳到后天了）', row(cd._id).pushAt, t + DAY);
+    eq('仍然是未处理态', row(cd._id).pushed, false);
   }
 
   console.log('\n----------------------------------------');

@@ -800,30 +800,45 @@ async function run() {
     eq('客户端改不了 pushErr', byId(it._id).pushErr, '');
 
     // ---- 未送达计数 ----
+    // 夹具照真库的形态给：被 fqRemind 处理过、但没送出去的那条，
+    // pushErr 里一定留着原因（no-quota / expired / 错误码）。
     it.pushed = true;
     it.pushOk = false;
+    it.pushErr = 'no-quota';
     const boot2 = await call({ action: 'bootstrap' });
     eq('没送出去的那条被计进 missed', boot2.data.sub.missed, 1);
 
+    // ⚠️ v9：「每天提醒」的条目 pushed 必须**一直是未处理态**（下一轮 tick 还要
+    // 再发它），所以未送达的判据不能挂在 pushed 上 —— 挂上去的话，额度耗尽时
+    // 用户永远看不到提示，只会在某天自己发现「提醒怎么不响了」。
+    it.pushed = false;
+    const boot2b = await call({ action: 'bootstrap' });
+    eq('每天提醒（pushed 仍为 false）没送出去也照样计数', boot2b.data.sub.missed, 1);
+
+    it.pushed = true;
     it.pushOk = true;
+    it.pushErr = '';
     const boot3 = await call({ action: 'bootstrap' });
     eq('送成功的从 missed 里消失', boot3.data.sub.missed, 0);
 
     it.pushOk = false;
+    it.pushErr = 'no-quota';
     it.done = true;
     const boot4 = await call({ action: 'bootstrap' });
     eq('已完成的不算未送达', boot4.data.sub.missed, 0);
 
-    // 种子事项一条都没被算进来（它们压根没有 pushed 字段，
-    // 而「pushed: true」这种等值条件挑不到「字段不存在」的文档）
+    // 种子事项一条都没被算进来（它们压根没有 pushed / pushErr 字段，
+    // 而判据里的 pushed: _.exists(true) 挑不到「字段不存在」的文档）
     it.done = false;
-    it.pushed = false;
+    delete it.pushed;
+    delete it.pushErr;
     const boot5 = await call({ action: 'bootstrap' });
     eq('没有 pushed 字段的老数据不误报未送达', boot5.data.sub.missed, 0);
 
     // ---- 别人家的失败不该算在我头上 ----
     it.pushed = true;
     it.pushOk = false;
+    it.pushErr = 'no-quota';
     FC.OPENID = 'openid-b';
     const boot6 = await call({ action: 'bootstrap' });
     eq('别人没送达的不计进我的 missed', boot6.data.sub.missed, 0);
@@ -1039,6 +1054,176 @@ async function run() {
         return !(r.remindAt > 0) || r.leadMin === -1;
       });
       eq('全库没有「不提醒却带着 pushAt」的行', bad.length, 0);
+    }
+  }
+
+  console.log('\n[23] 提醒周期：只认「每天」/ 每天模式下夹提前量 / 改周期也要复位');
+  {
+    reset();
+    FC.OPENID = 'openid-a';
+    const boot = await call({ action: 'bootstrap' });
+    const catId = boot.data.categories[0]._id;
+    const DAY_MS = 24 * 3600 * 1000;
+    const far = Date.now() + 400 * DAY_MS;
+
+    const mk = async function (item) {
+      const r = await call({
+        action: 'addItem',
+        item: Object.assign({ catId: catId, quad: 'q1', remindAt: far }, item),
+      });
+      return byId(r.data._id);
+    };
+
+    // ---- 默认「只提醒一次」，而且是**显式落 0**（不是留空）----
+    // 显式落库的好处：往后「字段存不存在」不再是一种额外含义，
+    // 云函数里那些 _.neq(true) 式的查询也就少一层含糊（与 progress 同一个理由）。
+    eq('不传 repeat → 落 0（只提醒一次）', (await mk({ title: '默认周期' })).repeat, 0);
+    eq('repeat = 1 原样落库', (await mk({ title: '每天', repeat: 1 })).repeat, 1);
+
+    // ---- ⚠️ 只认 1 这一个值。其余一律 0（「只提醒一次」）----
+    // 失败方向是「少提醒」吗？不，是「少**重复**提醒」—— 用户仍然会收到那一条，
+    // 只是不会每天响。与 leadMin 的取舍刚好相反，因为「每条额度都要烧一条」这件事
+    // 让「多发」比「少发」更贵。所以这里不设默认档，脏值直接退到最省的那一档。
+    const badRepeat = [0, 2, -1, 5, 0.5, '1x', '', '2', null, undefined, NaN];
+    for (let i = 0; i < badRepeat.length; i++) {
+      eq('脏值 ' + String(badRepeat[i]) + ' → 落 0', (await mk({ title: '脏', repeat: badRepeat[i] })).repeat, 0);
+    }
+
+    // ---- ⚠️ 每天模式下超过 1 天的提前量**夹到 180**，不是回落默认 ----
+    // 「每天提醒 + 提前 30 天」字面读出来就是「提前 30 天起每天推一条」= 连推 30 条，
+    // 还会把攒了很久的额度一次性烧光。夹到最接近的合法档而不是跳到 30 分钟，
+    // 是因为用户表达的是「想提前得多一点」，而失败方向仍是「发得晚」而不是「不发」。
+    {
+      const a = await mk({ title: '每天+7天', repeat: 1, leadMin: 10080 });
+      eq('每天 + 提前 7 天 → 夹到 180', a.leadMin, 180);
+      eq('pushAt 按夹取后的值算', a.pushAt, a.remindAt - 180 * 60000);
+
+      const b = await mk({ title: '每天+1天', repeat: 1, leadMin: 1440 });
+      eq('每天 + 提前 1 天 → 夹到 180', b.leadMin, 180);
+
+      // 边界：180 **不是**超限档，不能被误夹
+      const c = await mk({ title: '每天+3小时', repeat: 1, leadMin: 180 });
+      eq('每天 + 提前 3 小时 → 原样保留（边界不该被夹）', c.leadMin, 180);
+      eq('每天 + 提前 1 小时 → 原样保留', (await mk({ title: '每天+1小时', repeat: 1, leadMin: 60 })).leadMin, 60);
+
+      // ⚠️ 哨兵 -1 必须排在夹取之前：0 > 180 不成立所以看着没事，
+      // 但一旦有人把夹取写成 `n > LEAD_DAILY_MAX ? LEAD_DAILY_MAX : n` 之外的
+      // 形式（例如先 clamp 再判白名单），-1 就可能被当成「很小的数」留下来。
+      // 「不提醒」是这三种里唯一**不允许被改写**的值 —— 用户明确说了不要通知。
+      const d = await mk({ title: '每天+不提醒', repeat: 1, leadMin: -1 });
+      eq('每天 + 不提醒 → 仍是 -1（哨兵不被夹取改写）', d.leadMin, -1);
+      eq('pushAt 落 null', d.pushAt, null);
+    }
+
+    // ---- 反向对照：夹取只发生在每天模式，仅一次不受影响 ----
+    {
+      const a = await mk({ title: '一次+7天', leadMin: 10080 });
+      eq('仅一次 + 提前 7 天 → 原样保留（夹取没溢出到这条路径）', a.leadMin, 10080);
+      const b = await mk({ title: '一次+30天', leadMin: 43200 });
+      eq('仅一次 + 提前 30 天 → 原样保留', b.leadMin, 43200);
+    }
+
+    // ---- ⚠️ 改周期也必须复位推送状态，且要用**新**周期夹提前量 ----
+    // 不复位的表现是「选了每天提醒，第二天却怎么都不响」（它已经发过一次、
+    // pushed 还是 true）；用旧周期夹的表现是「先选每天、再选提前 7 天、
+    // 一次请求里送上去，结果 7 天没被夹掉」。
+    {
+      const add = await call({
+        action: 'addItem',
+        item: { title: '改周期', catId: catId, quad: 'q1', remindAt: far, leadMin: 43200, repeat: 0 },
+      });
+      const id = add.data._id;
+      eq('前提：仅一次 + 提前 30 天，档位原样', byId(id).leadMin, 43200);
+
+      byId(id).pushed = true;
+      byId(id).pushOk = true;
+      byId(id).pushErr = '';
+
+      // 只改周期、另外两个字段原样回传 —— 这是客户端每次保存的真实形状
+      await call({
+        action: 'updateItem',
+        id: id,
+        patch: { remindAt: far, leadMin: 43200, repeat: 1 },
+      });
+      eq('改成每天 → pushed 复位（否则它再也不会响）', byId(id).pushed, false);
+      eq('顺手把 pushOk 也复位', byId(id).pushOk, false);
+      eq('提前量被**新**周期夹到 180', byId(id).leadMin, 180);
+      eq('pushAt 跟着重算', byId(id).pushAt, far - 180 * 60000);
+      eq('提醒时间没被动过', byId(id).remindAt, far);
+      eq('周期本身落了 1', byId(id).repeat, 1);
+
+      // 同样三个字段原样再回传一次 → 这时什么都没变，不该复位
+      byId(id).pushed = true;
+      await call({
+        action: 'updateItem',
+        id: id,
+        patch: { remindAt: far, leadMin: 180, repeat: 1 },
+      });
+      // ⚠️ 这里如果写成 `leadMin: 43200`（客户端手里那份「用户当初选的」），
+      // 夹取结果仍是 180，所以照样不该复位 —— 这条断言同时守住「拿 nextLead
+      // 比而不是拿入参比」这个细节。
+      eq('三个字段原样回传 → 已推过的不重新排队', byId(id).pushed, true);
+      byId(id).pushed = false;
+
+      // 改回「仅一次」：180 是**保留**的，不会还原成 43200 ——
+      // 夹取是不可逆的信息损失（用户当初选的档位没存第二份）。
+      // 这是有意的：为它多存一个字段，只为了让一次「改回去」看起来更聪明，
+      // 不值。而且 180 仍然是用户想要的「提前不少」那一档。
+      await call({ action: 'updateItem', id: id, patch: { repeat: 0 } });
+      eq('改回仅一次 → 周期落 0', byId(id).repeat, 0);
+      eq('夹过的提前量保留 180（夹取不可逆）', byId(id).leadMin, 180);
+      eq('仅一次模式下 180 本就合法，pushAt 重算成同一个值', byId(id).pushAt, far - 180 * 60000);
+
+      // 只改标题、周期原样回传 → 什么都不该动
+      byId(id).pushed = true;
+      await call({ action: 'updateItem', id: id, patch: { title: '只改标题', repeat: 0 } });
+      eq('只改标题 → 已推过的不重新排队', byId(id).pushed, true);
+    }
+
+    // ---- ⚠️ 只改周期、且提前量**不需要夹取**时，也必须复位 ----
+    // 上面那条用的是「每天 + 提前 30 天」，夹取让 nextLead 从 43200 变成 180 ——
+    // 于是即便实现里漏掉 `oldRepeat !== nextRepeat` 这一项，pushed 照样会被复位
+    // （因为 nextLead 也变了），那条断言**检验的东西和我以为的不是同一个**。
+    // 变异验证实测抓到了这一点（mutate-repeat.js「变化判定漏掉 repeat」跑出来是绿的）。
+    // 这条用 60（≤LEAD_DAILY_MAX，不触发夹取），保证「只有 repeat 变了」。
+    {
+      const it = await mk({ title: '只改周期', leadMin: 60, repeat: 0 });
+      const before = it.pushAt;
+      byId(it._id).pushed = true;
+      byId(it._id).pushOk = true;
+
+      await call({ action: 'updateItem', id: it._id, patch: { repeat: 1 } });
+      eq('只改周期（提前量无需夹取）→ pushed 也复位', byId(it._id).pushed, false);
+      eq('提前量原样没动', byId(it._id).leadMin, 60);
+      eq('提醒时间没被碰过', byId(it._id).remindAt, far);
+      eq('pushAt 落在同一个值上', byId(it._id).pushAt, before);
+      eq('周期落了 1', byId(it._id).repeat, 1);
+    }
+
+    // ---- 清提醒时间：周期**保留**（周期是偏好，提醒时间是开关）----
+    {
+      const it = await mk({ title: '清了时间', repeat: 1, leadMin: 60 });
+      await call({ action: 'updateItem', id: it._id, patch: { remindAt: null } });
+      const r = byId(it._id);
+      eq('清提醒时间 → remindAt 落 null', r.remindAt, null);
+      eq('清提醒时间 → leadMin 一并落 null', r.leadMin, null);
+      eq('清提醒时间 → pushAt 一并落 null', r.pushAt, null);
+      // 清的是「什么时候提醒」，不是「要不要每天」。用户下次再设时间时
+      // 周期还在，不必重选一遍 —— 界面上的表现是「周期那行没被重置」。
+      eq('清提醒时间 → 周期保留（不是提醒时间的附庸）', r.repeat, 1);
+    }
+
+    // ---- 全库不变量：repeat 只可能是 0 / 1 ----
+    {
+      const odd = COLLECTIONS.fq_items.filter(function (r) {
+        return r.repeat !== 0 && r.repeat !== 1;
+      });
+      eq('全库没有非 0 / 1 的周期值', odd.length, 0);
+
+      const mismatch = COLLECTIONS.fq_items.filter(function (r) {
+        return r.repeat === 1 && r.leadMin !== null && r.leadMin > 180;
+      });
+      eq('全库没有「每天却还留着超 1 天的提前量」的行', mismatch.length, 0);
     }
   }
 

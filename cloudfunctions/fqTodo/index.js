@@ -11,8 +11,8 @@
 //   fq_members     { _openid, fid, role, name, active, joinedAt }
 //   fq_categories  { fid, _openid, name, order, createdAt }
 //   fq_items       { fid, _openid, title, note, quad, catId, priority, progress, done,
-//                    remindAt, leadMin, pushAt, order, createdAt, updatedAt, doneAt, doneBy,
-//                    pushed, pushedAt, pushOk, pushErr }
+//                    remindAt, leadMin, pushAt, repeat, order, createdAt, updatedAt,
+//                    doneAt, doneBy, pushed, pushedAt, pushOk, pushErr }
 //
 //   · progress 是 0~100 的整数（v7 新增）。它和 done **不是两个字段，而是同一条
 //     状态线的两种读法**：落库后永远满足 done ⟺ progress === 100。耦合钉在
@@ -21,6 +21,11 @@
 //     （白名单见 LEAD_ALLOWED，**-1 表示不提醒**）；pushAt = 预算好的推送时刻
 //     = remindAt - leadMin * 60000。两个都落库而不是查询时现算，理由写在
 //     toPushAt 上面 —— 一句话：fqRemind 没法用单一扫描窗口表达逐条不同的提前量。
+//   · repeat（v9 新增）= 0 只提醒一次（默认）/ 1 每天提醒。
+//     ⚠️ 它改的是 fqRemind 的**行为**（发完把 pushAt 滚到下一个整天），
+//     但必须由本函数落库、并纳入「提醒这一组」的变化判定：从「一次」改成
+//     「每天」时若不复位 pushed，那条提醒已经发过一次、改完就再也不会响
+//     （表现是「选了每天提醒，第二天却怎么都不响」）。
 //   fq_plans       { fid, _openid, date, text, updatedAt }
 //   fq_subs        { _openid, quota, lastGrantAt, updatedAt }
 //
@@ -104,6 +109,17 @@ const GRANT_MIN_MS = 300;
 const LEAD_ALLOWED = [-1, 5, 10, 30, 60, 180, 1440, 4320, 10080, 43200];
 const LEAD_DEFAULT = 30;
 
+// 「每天提醒」模式下提前量的上限（分钟）。与 utils/const.js 的 LEAD_DAILY_MAX 成对。
+// 为什么要有它：「每天提醒」+「提前 30 天」字面读出来就是「提前 30 天起、每天推一条」，
+// 等于连推 30 条同一件事。而会用到每天提醒的场景（吃药、锻炼、喂水、喂猫）本来
+// 就不需要提前几天，所以直接把这组档位收掉，比让用户自己承担组合后果干净。
+// ⚠️ 客户端会藏掉这几档，但**藏不是防线** —— toLead 这里还要再夹一次
+// （同 toStr / toQuad 的一贯做法：前端能绕过，后端不能信任）。
+const LEAD_DAILY_MAX = 180;
+
+// 提醒周期：0 = 只提醒一次（默认），1 = 每天提醒。与 utils/const.js 的 REPEAT_OPTIONS 一致。
+const REPEAT_DAILY = 1;
+
 // 邀请码：6 位，去掉 0/O/1/I/L 这些看起来像的字符
 const CODE_CHARS = '23456789ABCDEFGHJKMNPQRSTUVWXYZ';
 const CODE_LEN = 6;
@@ -129,14 +145,18 @@ const INVITE_TTL = 24 * 60 * 60 * 1000;
             （pushAt = 预计算的推送时刻），fqRemind 的扫描条件从 remindAt 换成
             pushAt。⚠️ 这次 fqRemind 也必须重新部署 —— 它不在 action 清单里，
             握手管不到它，靠版本号提醒你自己记得。
+   v8 → v9：提醒周期（只提醒一次 / 每天提醒）。fq_items 多出 repeat 字段，
+            fqRemind 多出一套「发完把 pushAt 滚到下一个整天」的循环逻辑。
+            ⚠️ fqRemind 这次的部署同样是硬要求：不部署就一次都不会滚，
+            表现是「选了每天提醒，第二天再也不响」。
    客户端首屏 bootstrap 会拿这个值做握手，对不上直接弹窗告诉你重新部署。
 
-   ⚠️ v7 和 v8 这两次**都没有**新增 action，为什么照样 +1：旧云函数不认识新字段，
+   ⚠️ v7 / v8 / v9 这三次**都没有**新增 action，为什么照样 +1：旧云函数不认识新字段，
    客户端送上去会被它静默丢掉（白名单写法，没列进去的字段一律无视）——
-   v7 的表现是「拖完进度条看着生效了，一刷新全回到 0%」，v8 的表现是
-   「选好的提前量重进一次就变回 30 分钟」。这正是握手要拦的那类
-   「代码明明对却悄无声息」的故障，所以版本号必须动。 */
-const FN_VER = 8;
+   v7 的表现是「拖完进度条看着生效了，一刷新全回到 0%」，v8 是「选好的提前量
+   重进一次就变回 30 分钟」，v9 是「选了每天提醒，第二天不响」。这正是握手要拦的
+   那类「代码明明对却悄无声息」的故障，所以版本号必须动。 */
+const FN_VER = 9;
 
 const ACTIONS = [
   'bootstrap',
@@ -194,9 +214,22 @@ function toRemind(v) {
 
 // 提前量净化：白名单之外的（undefined / null / NaN / 字符串 / 小数）
 // 一律回落到 LEAD_DEFAULT，**绝不回落成 -1**（理由见 LEAD_ALLOWED 上面那段）。
-function toLead(v) {
+//
+// 第二个参数是这条事项的提醒周期。每天提醒下超过 LEAD_DAILY_MAX 的档位
+// **夹到上限**而不是回落默认 —— 用户表达的是「想提前得多一点」，夹到最接近的
+// 合法档比跳到 30 分钟更贴近他的意图，而且失败方向仍是「发得晚」而不是「不发」。
+function toLead(v, repeat) {
   const n = Math.round(Number(v));
-  return LEAD_ALLOWED.indexOf(n) >= 0 ? n : LEAD_DEFAULT;
+  if (LEAD_ALLOWED.indexOf(n) < 0) return LEAD_DEFAULT;
+  if (repeat === REPEAT_DAILY && n > LEAD_DAILY_MAX) return LEAD_DAILY_MAX;
+  return n;
+}
+
+// 提醒周期净化：只认 1（每天），其余一律 0（只提醒一次）。
+// 老数据没有这个字段 → undefined → 0，正是「升级上来仍旧只响一次」的语义，
+// 所以这次不需要像 pushAt 那样写一个回填函数。
+function toRepeat(v) {
+  return Number(v) === REPEAT_DAILY ? REPEAT_DAILY : 0;
 }
 
 // 预计算「推送时刻」= 提醒时间 - 提前量。落库而不是查询时现算，是被逼出来的：
@@ -461,6 +494,9 @@ async function seed(openid, fid) {
         // 但白做一次写、也让「老数据」这个判断失焦。
         leadMin: it.remind ? LEAD_DEFAULT : null,
         pushAt: it.remind ? toPushAt(tmr.getTime(), LEAD_DEFAULT) : null,
+        // 周期也照默认落（只提醒一次），理由同上：让种子看起来就是新数据，
+        // 而不是「缺少 v9 字段的遗留」。
+        repeat: 0,
         order: 1000 + i, // 种子数据排在新增事项之前
         createdAt: db.serverDate(),
         updatedAt: db.serverDate(),
@@ -556,10 +592,15 @@ async function addItem(openid, event) {
   const owned = await db.collection(COL_CATS).where({ _id: catId, fid: ctx.fid }).count();
   if (owned.total === 0) throw new Error('分类不存在');
 
-  // 提醒这一组三个字段是**一起算出来的**，所以先在外面算好再落库：
-  // leadMin 只在真设了提醒时间时才有值 —— 没有提醒时间就没有「提前多久」可言。
+  // 提醒这一组（remindAt / leadMin / pushAt / repeat）是**一起算出来的**，
+  // 所以先在外面算好再落库。
+  // ⚠️ 顺序有讲究：repeat 必须先净化 —— 「每天提醒」决定提前量的上限，
+  // 先算 leadMin 再读 repeat 的话，一次请求里送「每天 + 提前 30 天」就会漏夹
+  // （客户端已经藏了那几档，但前端能绕过，后端不能按客户端的顺序假设）。
+  const repeat = toRepeat(src.repeat);
   const remindAt = toRemind(src.remindAt);
-  const leadMin = remindAt === null ? null : toLead(src.leadMin);
+  // leadMin 只在真设了提醒时间时才有值 —— 没有提醒时间就没有「提前多久」可言。
+  const leadMin = remindAt === null ? null : toLead(src.leadMin, repeat);
 
   const res = await db.collection(COL_ITEMS).add({
     data: {
@@ -577,6 +618,9 @@ async function addItem(openid, event) {
       remindAt: remindAt,
       leadMin: leadMin,
       pushAt: toPushAt(remindAt, leadMin),
+      // 周期同样是「提醒这一组」的成员。新建时显式落 0（只提醒一次），
+      // 好处同 progress：往后「字段存不存在」不再是一种额外含义。
+      repeat: repeat,
       // pushed 系列由 fqRemind 消费。新建时显式落 false（而不是留空），
       // 查询条件里那些 _.neq(true) 就能少一层「字段不存在」的含糊。
       pushed: false,
@@ -606,33 +650,45 @@ async function updateItem(openid, event) {
   if (src.note !== undefined) patch.note = toStr(src.note, MAX_NOTE);
   if (src.quad !== undefined) patch.quad = toQuad(src.quad);
   if (src.priority !== undefined) patch.priority = toPriority(src.priority);
-  // 提醒这一组：remindAt 与 leadMin 任一进来，三个字段就一起重算 ——
-  // 它们不是独立字段，pushAt 完全由前两个决定，分开更新必然算出个中间态。
-  if (src.remindAt !== undefined || src.leadMin !== undefined) {
-    // 先读旧值。客户端每次保存都会把 remindAt / leadMin 一起带上（哪怕没动过），
+  // 提醒这一组：remindAt / leadMin / repeat 任一进来，这一组就一起重算 ——
+  // 它们不是独立字段（pushAt 完全由前三个决定），分开更新必然算出个中间态。
+  if (src.remindAt !== undefined || src.leadMin !== undefined || src.repeat !== undefined) {
+    // 先读旧值。客户端每次保存都会把这三个一起带上（哪怕没动过），
     // 若无脑复位推送状态，用户只是想改个标题，那条已经推过的提醒就会被重新排进
     // 队列、到点再发一条重复的 —— 而每条消息都要烧掉一条攒来的额度。
     const cur = await db.collection(COL_ITEMS).where({ _id: id, fid: ctx.fid }).limit(1).get();
     const old = cur.data.length ? cur.data[0] : {};
 
+    // ⚠️ 老数据（v8 之前没有 leadMin、v9 之前没有 repeat）在这里必须按默认值补齐，
+    // 而不是留成 null/undefined：否则「用户只改了个标题」会被判成
+    // 「提前量从 30 变成了 null」，白白复位推送状态、白烧一条额度。
+    const oldRepeat = toRepeat(old.repeat);
     const oldAt = toRemind(old.remindAt);
-    // ⚠️ 老数据（v8 之前）没有 leadMin，这里必须按默认值补齐而不是落成 null：
-    // 否则「用户只改了个标题」会被判成「提前量从 30 变成了 null」，白白复位推送状态。
-    const oldLead = oldAt === null ? null : toLead(old.leadMin);
+    const oldLead = oldAt === null ? null : toLead(old.leadMin, oldRepeat);
 
+    const nextRepeat = src.repeat !== undefined ? toRepeat(src.repeat) : oldRepeat;
     const nextAt = src.remindAt !== undefined ? toRemind(src.remindAt) : oldAt;
     // 没传 leadMin 就沿用旧值；旧值也拿不到（老数据）时 toLead(null) 会回落成
     // LEAD_DEFAULT —— 正是我们要的「默认 30 分钟」。nextAt 为空则必须是 null：
     // 没有提醒时间就谈不上「提前多久」。
+    // ⚠️ 夹取要用 **nextRepeat** 而不是 oldRepeat：同一次请求可能既把周期改成
+    // 「每天」、又保留了原来「提前 7 天」的档位，用旧周期算就会漏夹。
     const nextLead =
-      nextAt === null ? null : toLead(src.leadMin !== undefined ? src.leadMin : oldLead);
+      nextAt === null
+        ? null
+        : toLead(src.leadMin !== undefined ? src.leadMin : oldLead, nextRepeat);
 
     patch.remindAt = nextAt;
     patch.leadMin = nextLead;
-    patch.pushAt = toPushAt(nextAt, nextLead);
+    patch.repeat = nextRepeat;
 
-    // 只有「提醒时间」或「提前量」**真的变了**才复位推送状态。
-    if (oldAt !== nextAt || oldLead !== nextLead) {
+    // 只有这三个**真的变了**才重算 pushAt 并复位推送状态（否则改标题会误触发）。
+    //
+    // ⚠️ 这一句 pushAt 必须在 if 里面。每天提醒的 pushAt 是 fqRemind 往前**滚过**的
+    // 值（起点 + 整数天），无脑重算会把它拽回「起点 - 提前量」——一个早就过去的
+    // 时刻，下一轮 tick 白记一条状态再滚回来。改标题不该动调度。
+    if (oldAt !== nextAt || oldLead !== nextLead || oldRepeat !== nextRepeat) {
+      patch.pushAt = toPushAt(nextAt, nextLead);
       patch.pushed = false;
       patch.pushedAt = null;
       patch.pushOk = false;
@@ -1098,9 +1154,19 @@ async function subInfo(openid) {
 
   // 「未送达」只算**自己创建的**条目：提醒发给的是条目创建者，
   // 家里别人那条没送出去，不该记在我头上。
+  //
+  // ⚠️ 判据是「处理过（pushed 字段在）**且最近一次没成功**」，**不是 pushed: true**。
+  // 「每天提醒」的条目 pushed 必须一直是未处理态（下一轮 tick 还要再发它），
+  // 若用 pushed 当判据，它永远进不了这个统计 —— 于是额度耗尽时用户看不到任何提示，
+  // 只会在某天自己发现「提醒怎么不响了」。这正是这个统计存在的意义。
   const miss = await db
     .collection(COL_ITEMS)
-    .where({ _openid: openid, pushed: true, pushOk: _.neq(true), done: _.neq(true) })
+    .where({
+      _openid: openid,
+      pushed: _.exists(true),
+      pushErr: _.neq(''),
+      done: _.neq(true),
+    })
     .count();
 
   return { quota: quota, missed: miss.total, templateId: SUB_TEMPLATE_ID };

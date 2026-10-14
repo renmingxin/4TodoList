@@ -112,7 +112,8 @@
   且**必须由用户真的点一次触发**才攒得到额度（「设了提醒」本身不产生额度）。
   单独放一个「补授权」按钮属于「无触发场景的订阅」，微信不认。
   ⚠️ v8 起触发条件收紧为 `remindAt && leadMin !== -1`（选了「不提醒」就不弹订阅框），
-  且**拒绝时当场 toast**（理由见 1.4.1）。
+  且**拒绝时当场 toast**（理由见 1.4.1）。v9 又给「我的」页加了「补充提醒额度」入口
+  （`onTopUpQuota` → 同一个 `askSubscribe`，**不另开授权路径**）。
 
 ### 1.4.1 提前量的可配置化（v8，2026-10-13）
 
@@ -166,6 +167,110 @@
   其中「回填判据 `leadMin` ↔ `pushAt`」那条变异**已被证伪并删除**（理由见上）。
 - **部署**：`FN_VER` 7 → 8；`fq_items` 的提醒索引从 `remindAt` **改建到 `pushAt`**；
   ⚠️ **`fqRemind` 必须单独重新部署**（不在 action 清单里，握手管不到它，旧包**一条都不发**）。
+
+### 1.4.2 提醒周期（v9，2026-10-14）
+
+**数据模型**：`fq_items` 多出 `repeat`（`0` = 只提醒一次，默认；`1` = 每天提醒）。
+**没有新增 action**，但 `FN_VER` 8 → 9 —— 版本号钉的是「云端认不认得客户端发过来的字段」。
+
+**四份常量、两种归属**：
+
+| 常量 | 值 | `const.js` | `fqTodo` | `fqRemind` |
+|---|---|---|---|---|
+| `REPEAT_OPTIONS` / `REPEAT_DEFAULT` | `[{0,1}]` / `0` | ✔ | — | — |
+| `REPEAT_DAILY` | `1` | （隐含在 `REPEAT_OPTIONS`） | ✔ | ✔ |
+| `LEAD_DAILY_MAX` | `180` | ✔ | ✔ | **有意没有** |
+
+⚠️ `fqRemind` **不需要** `LEAD_DAILY_MAX`：夹取是 `fqTodo` 的 `toLead(v, repeat)` 做的，
+`fqRemind` 只按落库的 `pushAt` 扫。少一个要在三处同步的常量 = 少一处漂移点
+（`test-remind.js` 第 [12] 组**专门断言 fqRemind 里没有这个常量**，免得后人「顺手补齐」）。
+
+**云函数 `fqTodo`**：
+
+- `toRepeat(v)`：**只认 `1`，其余一律 `0`**（11 个脏值的净化在 [23] 组）。
+- `addItem`：`const repeat = toRepeat(src.repeat)` 必须**提到 `remindAt` 之前** ——
+  `leadMin = toLead(src.leadMin, repeat)` 要用它来决定是否夹取。
+- `updateItem` 的提醒块**四字段联动**（`remindAt` / `leadMin` / `pushAt` / `repeat`），
+  且 **`patch.pushAt = toPushAt(...)` 要留在 `if` 里**：无条件写会把 `fqRemind` 滚过去的 `pushAt`
+  **拽回起点**，那条「每天」就永远停在第一天。
+- ⚠️ **「变了」的判定要用按新周期夹取之后的提前量**：一次请求里可能既改周期又保留旧档位
+  （`30 天 → 夹到 180`），拿旧值比会漏掉 `pushed` 复位。**只改周期也要复位**（提前量没动也一样）。
+- **清除提醒时间时保留 `repeat`**：客户端在 `remindAt` 为空时**不送** `repeat`，
+  云函数见 `undefined` 就沿用旧值。`leadMin` / `pushAt` 照旧落 `null`。
+
+**云函数 `fqRemind`**：
+
+```js
+function nextDailyPushAt(pushAt, now) {           // 一次跳到「严格大于 now」的第一个整天
+  const at = Number(pushAt);
+  if (!Number.isFinite(at) || at <= 0) return null;
+  if (at > now) return at;
+  return at + (Math.floor((now - at) / DAY_MS) + 1) * DAY_MS;
+}
+```
+
+- ⚠️ **去重判据换了**。普通提醒靠 `where({_id, pushed: _.neq(true)})` 抢锁；
+  「每天」的 `pushed` 在写入前后**都成立**（下一轮还要发），两条并发实例会**双双 `updated: 1`**。
+  改为**拿 `pushAt` 当版本号**：`claim(item, patch, nextAt)` 里
+  `where.pushAt = item.pushAt`（读到的那个值）+ `data.pushAt = nextAt` + `data.pushed = false`
+  —— **同一次 update** 里完成「滚」与「写回未处理态」，分两次就会漏出一个空窗。
+- ⚠️ **三条路径都要滚**（过期 / 正常发送 / 发送失败）：`nextAt` 在**进分支之前**算好，统一交给 `claim`。
+  漏一条那条提醒就**卡死在原地再也不响**，而且不报错。
+- ⚠️ **过期的「每天」不记 `expired`**：`pushAt` 停在过去是它**设计内的状态**
+  （刚切成每天 / 云函数停过几天），滚一下就好 —— 记成未送达会让用户看到一条**根本不存在的失败**。
+  `stat` 里 `expired` 与 `rolled` **分开计数**。
+- **通知里的时间**：`pushMs = Number(item.pushAt) + (lead > 0 ? lead : 0) * 60000`，
+  `time23` 用它而**不再读 `remindAt`** —— 两者在第一次提醒上恰好相等，但「每天」的 `pushAt`
+  一直往前滚、`remindAt` 停在原地，读它的话第 5 天收到的通知写着第 1 天的日期。
+
+**客户端**（`pages/index/index.js`）：
+
+- ★ **派生值只有一个出口 `remindVM(f)`**：一次算出 `hasRemind` / `remLabel` / `leadLabel` /
+  `repeatLabel` / `repeatDaily` / `leadOpts` / `repeatOpts` / `remPrev` / `remPrevOff` / `remIcon`。
+  五个 handler（`onDate` / `onTime` / `onToggleLead` / `onLead` / `onRepeat`）**一律走
+  `applyRemind(patch)`**（合并 → `remindVM` 重算 → 一次 `setData({ form })`）。
+  ⚠️ 各算一遍的模式下，漏一个的表现是「改了档位预览行不动」—— 不报错，只是安静地说错话。
+  `applyRemind` 写回**整个 `form`** 而不是 `'form.date'` 之类的子路径：
+  `setData` 同时收到整对象与子路径时谁生效是不确定的。
+- **三道形状相同的 guard**：`onToggleLead` / `onLead` / `onRepeat` 都以
+  `if (!this.data.form.hasRemind) return;` 开头（列表在未设时间时本就不渲染，但写成一模一样更可靠 ——
+  v9 时 `onLead` 漏了这道，被 test-reorder 抓到）。
+- `repeatValueOf(idx)` / `leadIdxFor(v, repeatIdx)` / `leadOptsFor(repeatIdx)` / `clampDailyLead(v)`
+  都是**顶层纯函数**；`REPEAT_DAILY_IDX` / `REPEAT_DEFAULT_IDX` 用
+  `o.v !== REPEAT_DEFAULT` **算出来**，不写死下标。
+- `onSave`：`if (remindAt) payload.repeat = repeatValueOf(f.repeatIdx);`（**没设时间就不送**）；
+  编辑镜像 `if (payload.repeat !== undefined) it.repeat = payload.repeat;`
+  新建镜像 `repeat: payload.repeat === undefined ? REPEAT_DEFAULT : payload.repeat`。
+- `onTopUpQuota()` 就是 `this.askSubscribe()` —— 「我的」页的补额度入口，**不另开一条授权路径**。
+
+**样式（`index.wxss`）**：`.remcard`（一张卡）/ `.remrow`（三行）/ `.optrow`（行内展开的档位列表，
+`on` / `ck2`）/ `.seg`（周期二选一）/ `.remprev`（预览行）/ 三个内联 SVG 图标
+（`ico-bell` / `ico-bell-off` / `ico-rep`，颜色烧成 `%2398a0ac`）。
+
+- ⚠️ **置灰用底色（`.remrow.dis`）而不是 `opacity`** —— 后者会把那句「先设置提醒时间」一起稀释掉。
+  同理 `.seg.dis` 的轨道要**反向用白**：置灰行底色本身就是 `--line2`，轨道同色会让整个控件消失。
+- **picker 触区**：`.remrow .pkd { min-width: 130rpx }` / `.pkt { min-width: 110rpx }`，两者
+  `text-align: right` —— 参考稿是「铺满整行的透明控件」，塞进一行后 `09:00` 只有 63rpx 宽，
+  远低于触区下限；补 `min-width` 后视觉上仍像一个整体。
+- `.ico-chev-dn`（展开态）挂在 `app.wxss` 那条 `.ico-chev-l, .ico-chev-r` 的合并规则上。
+
+**测试 / 变异**：
+
+- `test-cloudfn.js` 第 [23] 组（`toRepeat` 净化 / 每天夹取含边界 180 / `-1` 哨兵不被改写 /
+  只改周期也复位 / 清时间保留周期 / 全库不变量）；`test-remind.js` 第 [15] 组（滚动 / 未处理态 /
+  一次跳到未来 / 相位不变 / 失败也滚 / 已滚不算未送达 / 并发去重）；`test-reorder.js` 里
+  v8 那组「提前量的本地镜像」**整体改写成 v9 的形状**（抽屉预选 / 脏数据就地夹取 / 预览行三句话
+  与置灰 guard / 清除与 payload 契约 / 新建路径 / WXML 静态接线 / 补额度入口）。
+- `.workbuddy/tmp/mutate-repeat.js`：**38/38 符合预期**（37 红 + 1 对照组绿）。
+  ⚠️ 抓到过一条**假绿**：「改周期要复位 `pushed`」的夹具配了「每天 + 提前 30 天」，
+  而**夹取**本身就让提前量变了 —— 实现漏掉 `repeat` 的比较也照样复位。补「提前量取 60」的用例才钉住。
+  另：一条断言的夹具传了 `leadMin: 3`，被 `toLead` 静默回落成 30 —— **实现是对的、夹具是错的**。
+- `.workbuddy/tmp/arch-baseline.json` 在 v9 的 UI 改动后**重新落过基线**
+  （class token 494 / css 选择器 341，来自 15 个 wxss）。
+
+**部署**：`FN_VER` 8 → 9；`fqTodo` **和** `fqRemind` **都要重新部署**；
+⚠️ 旧 `fqRemind` 的表现是「选了每天提醒，第二天就再也不响」（不是立即报错）。
+
 
 ## 二、首屏种子
 
@@ -332,6 +437,21 @@ node .workbuddy/tools/check-all.js
 **Edge 无头截图的坑**：截图是**异步落盘**的（命令返回后文件可能还没写完，要 sleep 再查存在性）；
 headless 的 `innerHeight` **比 `--window-size` 小 139px** —— 要精确模拟机型高度，
 用 `.screen{position:absolute;height:Npx}`，别依赖窗口尺寸。
+
+**Chrome + puppeteer-core 实测**（本机都有：`C:/Program Files/Google/Chrome/Application/chrome.exe`
++ `node/workspace/node_modules/puppeteer-core`；脚本放 `node/workspace` 跑，`NODE_PATH` 指向它的 `node_modules`）。
+用 DOM 桩能验逻辑，但**布局、裁切、命中区只有真浏览器量得准**。三条会咬人的：
+
+- ⚠️ **有过渡的元素，等动画停稳再量**。抽屉 `.sheet` 是 `transform:translateY(100%)` → `.on` 时归零；
+  `classList.add('on')` 之后**立刻**读 `getBoundingClientRect()`，读到的是**动画半途的位置** ——
+  实测得出过「抽屉跑到手机壳外面（`sheetRect.top 538 > phoneRect.bottom 532`）」这种荒谬结论，
+  睡 800ms 再量就是严丝合缝的 `bottom 532 = 532`。**凡是「位置/尺寸明显不合常理」的测量，先怀疑自己测早了。**
+- ⚠️ **元素截图会被该元素的 rect 裁掉超出部分**：截手机壳 `#p1` 时抽屉底部的按钮被切掉，看着像溢出；
+  单独截 `#p1sheet` 就完整（末按钮距底 15px、`scrollHeight = clientHeight = 365`）。
+  **判「有没有被裁」要用 rect 比，不能看截图缺了一块就下结论。**
+- ⚠️ **长页面上 `elementFromPoint` 对不在视口内的元素无效**：主稿 8 屏、绝大多数在视口外，
+  拿「行中心坐标」去探「点中的是谁」，返回的是视口内**别处**的元素（实测误报成 `d` —— 那是某条说明文字）。
+  要验「透明控件有没有铺满整行」，直接比 `.pkin` 与 `.pkrow` 的 rect（实测 286×37 vs 286×37 满铺）。
 
 ### 7.3 界面整块空白的排查顺序（原 `MEMORY.md` §2.5）
 
